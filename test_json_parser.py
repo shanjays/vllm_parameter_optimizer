@@ -9,25 +9,48 @@ import sys
 # This logic should be identical to the one currently in professor_reward.py
 # =========================================================================
 
+def _clean_number_string(s: str) -> str:
+    """
+    Clean a number string by removing trailing periods, handling scientific notation,
+    and other common LLM formatting issues.
+    """
+    s = s.strip()
+    # Remove trailing periods (e.g., "42.75." -> "42.75")
+    s = re.sub(r'\.+$', '', s)
+    # Remove leading/trailing whitespace again after cleanup
+    s = s.strip()
+    # Handle case where LLM outputs just 'e' or partial scientific notation
+    if s.lower() in ('e', 'e+', 'e-', '+e', '-e', ''):
+        return '0.0'
+    # Fix malformed scientific notation like "1.5e" -> "1.5"
+    s = re.sub(r'[eE][+-]?$', '', s)
+    return s
+
 def _extract_json_core(llm_output_str):
     """
     Core function logic from HAKT_Reward_Function._extract_json
     This uses ast.literal_eval to safely parse messy Python dictionaries.
+    Now supports <param></param> XML tag extraction.
     """
     
-    # 1. Regex to find the JSON block, optionally enclosed in markdown ticks (```json or ```)
-    match = re.search(r"```json\s*(.*?)\s*```|(\s*\{.*\}\s*)", llm_output_str, re.DOTALL)
-    
-    json_str = None
-    if match:
-        json_str = match.group(1) or match.group(2)
+    # Try to extract content from <param></param> XML tags first (preferred format)
+    param_match = re.search(r'<param>\s*(.*?)\s*</param>', llm_output_str, re.DOTALL | re.IGNORECASE)
+    if param_match:
+        json_str = param_match.group(1).strip()
+    else:
+        # 1. Regex to find the JSON block, optionally enclosed in markdown ticks (```json or ```)
+        match = re.search(r"```json\s*(.*?)\s*```|(\s*\{.*\}\s*)", llm_output_str, re.DOTALL)
         
-    if json_str is None:
-        # Fallback to finding the first { and last } 
-        start_idx = llm_output_str.find('{')
-        end_idx = llm_output_str.rfind('}')
-        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-            json_str = llm_output_str[start_idx : end_idx + 1]
+        json_str = None
+        if match:
+            json_str = match.group(1) or match.group(2)
+            
+        if json_str is None:
+            # Fallback to finding the first { and last } 
+            start_idx = llm_output_str.find('{')
+            end_idx = llm_output_str.rfind('}')
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                json_str = llm_output_str[start_idx : end_idx + 1]
         
     if json_str:
         # 2. Robust Cleanup
@@ -35,14 +58,22 @@ def _extract_json_core(llm_output_str):
         control_char_re = re.compile(r'[\x00-\x1F\x7F-\x9F]', flags=re.UNICODE)
         cleaned_str = control_char_re.sub('', json_str).strip()
         
+        # Clean number values with trailing periods
+        def clean_json_numbers(match):
+            return _clean_number_string(match.group(0))
+        cleaned_str = re.sub(r'[0-9]+\.?[0-9]*[eE]?[+-]?[0-9]*\.+(?=\s*[,\]\}])', clean_json_numbers, cleaned_str)
+        
         # 3. Use ast.literal_eval to safely parse Python dicts (allows single quotes, etc.)
         try:
             python_dict = ast.literal_eval(cleaned_str)
             return python_dict
             
         except (SyntaxError, ValueError, json.JSONDecodeError) as e:
-            # Catch any failure from parsing (SyntaxError is common for missing commas/quotes)
-            raise e
+            # Try json.loads as fallback
+            try:
+                return json.loads(cleaned_str)
+            except:
+                raise e
 
     raise ValueError("No valid JSON structure found in LLM output.")
     
@@ -50,9 +81,16 @@ def _extract_json_core(llm_output_str):
 # --- Test Cases based on common LLM failures ---
 # =========================================================================
 TEST_CASES = [
-    # 1. Successful JSON inside markdown ticks (Common success case)
+    # 1. JSON within <param> tags (NEW: preferred format)
     (
-        "Some reasoning text before the JSON.\n" ,"JSON (Ticked, Strict)"
+        """Here is my analysis of the kernel parameters.
+
+<param>
+{"reward_function": {"R_sm_throughput": 0.6, "R_dram_throughput": 0.2, "R_l1_hit_rate": 0.1, "R_l2_hit_rate": 0.1}, "pruned_action_space": {"BLOCK_SIZE_M": [64, 128], "BLOCK_SIZE_N": [64], "BLOCK_SIZE_K": [32], "num_warps": [4, 8], "num_stages": [4]}}
+</param>
+
+This configuration should work well.""",
+        "JSON (with <param> tags)"
     ),
     # 2. JSON with single quotes (Causes 'property name not enclosed in double quotes' in standard json.loads)
     (
@@ -66,7 +104,7 @@ TEST_CASES = [
     ),
     # 4. JSON with trailing comma (Causes failure in json.loads)
     (
-        '{"reward_function": {"R_sm": 1.0}, "pruned_action_space": {"BLOCK_SIZE_M": [16]}}', # Corrected input string for testing
+        '{"reward_function": {"R_sm": 1.0}, "pruned_action_space": {"BLOCK_SIZE_M": [16]}}',
         "JSON (Trailing Comma)"
     ),
     # 5. Missing markdown ticks, only curly braces (Common failure case, relies on robust regex Group 2)
@@ -78,7 +116,45 @@ TEST_CASES = [
     (
         "Plan: {'reward_function': {'R_sm': 1.0}, 'pruned_action_space': {'BLOCK_SIZE_M': [64]}} # Note: This is important.",
         "Python Dict (with comments)"
-    )
+    ),
+    # 7. JSON within <param> tags with extra whitespace
+    (
+        """<param>
+        
+{
+  "reward_function": {
+    "R_sm_throughput": 0.5,
+    "R_dram_throughput": 0.3,
+    "R_l1_hit_rate": 0.1,
+    "R_l2_hit_rate": 0.1
+  },
+  "pruned_action_space": {
+    "BLOCK_SIZE_M": [32, 64],
+    "BLOCK_SIZE_N": [64, 128],
+    "BLOCK_SIZE_K": [64],
+    "num_warps": [4],
+    "num_stages": [3, 4]
+  }
+}
+
+        </param>""",
+        "JSON (<param> with whitespace)"
+    ),
+]
+
+# =========================================================================
+# --- Test Cases for number cleaning ---
+# =========================================================================
+NUMBER_CLEANING_TEST_CASES = [
+    ("42.75.", "42.75"),
+    ("1.5e", "1.5"),
+    ("e", "0.0"),
+    ("e+", "0.0"),
+    ("e-", "0.0"),
+    ("", "0.0"),
+    ("3.14", "3.14"),
+    ("1e10", "1e10"),
+    ("2.5e-3", "2.5e-3"),
 ]
 
 
@@ -106,6 +182,16 @@ if __name__ == "__main__":
                 
         except Exception as e:
             print(f"RESULT: ❌ FAILED - Raised Exception: {e.__class__.__name__}: {e}")
+            all_passed = False
+
+    # Test number cleaning function
+    print("\n--- NUMBER CLEANING TESTS ---")
+    for input_val, expected in NUMBER_CLEANING_TEST_CASES:
+        result = _clean_number_string(input_val)
+        if result == expected:
+            print(f"✅ _clean_number_string('{input_val}') = '{result}'")
+        else:
+            print(f"❌ _clean_number_string('{input_val}') = '{result}', expected '{expected}'")
             all_passed = False
 
     print("\n" + "="*60)
