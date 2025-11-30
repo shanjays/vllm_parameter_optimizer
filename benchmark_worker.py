@@ -51,11 +51,9 @@ class BenchmarkWorker:
         Returns (state, reward, csv_data)
         """
         
-        # --- FIX for potential GROUP_SIZE_M error ---
-        # 1. Start with the complete default config
+        # --- FIX for GROUP_SIZE_M error ---
         config_to_use = DEFAULT_CONFIG.copy()
         if params_dict:
-            # 2. Update it with the PPO agent's chosen parameters
             config_to_use.update(params_dict)
         # --- END FIX ---
             
@@ -97,43 +95,34 @@ class BenchmarkWorker:
             print(f"[BenchmarkWorker] ERROR: NCU run timed out on GPU {self.gpu_id}.")
             return None, -100.0, None
 
-        # --- THIS IS THE FIX: Robust "Long Format" CSV Parsing ---
+        # --- FIX for Robust "Long Format" CSV Parsing ---
         try:
             csv_data = ""
-            # We will group metrics by Kernel Name and Invocation ID
-            # Ex: { "fused_moe_kernel_1": {'sm': 10.0, 'dram': 20.0, ...} }
             kernel_invocations = {}
 
             with open(self.ncu_log_path, 'r') as f:
-                # 1. Find the real header row, skipping garbage lines
                 header_line = None
                 file_lines = []
                 for line in f:
-                    csv_data += line # Store all data for the reward fn
-                    # A real ncu header will start with "ID" or "Kernel Name"
-                    # We look for "ID" as it's more reliable
+                    csv_data += line 
+                    file_lines.append(line)
                     if line.strip().startswith('"ID"'):
                         header_line = line
-                        # The rest of the file is data
                         file_lines.extend(f.readlines())
                         break
                 
                 if header_line is None:
                     raise Exception("NCU ran but did not produce a valid CSV header (no 'ID' row found).")
 
-                # 2. We found the header. Process the data.
-                # We use the lines we've already read
                 csv_reader = csv.DictReader([header_line] + file_lines)
                 
                 for row in csv_reader:
                     try:
-                        # Create a unique ID for each kernel invocation
                         invocation_key = f"{row['Kernel Name']}_{row['ID']}"
                         
                         if invocation_key not in kernel_invocations:
                             kernel_invocations[invocation_key] = {}
                         
-                        # Store the metric value
                         metric_name = row['Metric Name']
                         metric_value_str = row['Metric Value'].replace('%', '').strip()
                         metric_value = float(metric_value_str)
@@ -148,21 +137,17 @@ class BenchmarkWorker:
                             kernel_invocations[invocation_key]['l2'] = metric_value
                             
                     except (KeyError, ValueError, TypeError) as e:
-                        # This warning is normal for garbage lines that slip through
-                        # print(f"[BenchmarkWorker] WARNING: Skipping malformed/unexpected NCU row. Error: {e}. Row: {row}")
                         continue
             
-            # 3. Now, aggregate the metrics from all valid invocations
             metrics = {'sm': [], 'dram': [], 'l1': [], 'l2': []}
             for invocation in kernel_invocations.values():
-                # Only count *complete* data points
                 if all(k in invocation for k in ['sm', 'dram', 'l1', 'l2']):
                     metrics['sm'].append(invocation['sm'])
                     metrics['dram'].append(invocation['dram'])
                     metrics['l1'].append(invocation['l1'])
                     metrics['l2'].append(invocation['l2'])
             
-            if not metrics['sm']: # Check if we found any valid, complete invocations
+            if not metrics['sm']: 
                 raise Exception(f"NCU ran but found 0 *complete* kernel metric sets matching '{static_args['kernel_name']}'.")
             
             # --- END FIX ---
@@ -205,8 +190,6 @@ class BenchmarkWorker:
             print(f"[BenchmarkWorker] ERROR: vLLM import failed in worker. {e}")
             return 0.0
 
-        # This is a bit of a hack. We should pass static_args to the worker.
-        # For now, we'll hardcode the values we know.
         static_args = {
             "num_experts": 128,
             "inter_size": 1536,
