@@ -83,22 +83,22 @@ class HAKT_Reward_Function:
         Extracts the JSON plan from the LLM's completion using robust hybrid parsing.
         """
         
-        # 1. Regex to find the JSON block, handling markdown ticks or raw braces
-        match = re.search(r"```json\s*(.*?)\s*```|(\s*\{.*\}\s*)", llm_output_str, re.DOTALL)
+        # 1. First, simplify the string by removing common markdown wrappers
+        # This handles both ```json...``` and just ```...```
+        json_search_str = llm_output_str.replace('```json', '').replace('```', '')
         
-        json_str = None
-        if match:
-            json_str = match.group(1) or match.group(2)
-            
-        if json_str is None:
-            # Fallback to finding the first { and last } 
-            start_idx = llm_output_str.find('{')
-            end_idx = llm_output_str.rfind('}')
-            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-                json_str = llm_output_str[start_idx : end_idx + 1]
+        # 2. Extract the block between the first { and the last }
+        # This is now the primary, robust extraction method.
+        start_idx = json_search_str.find('{')
+        end_idx = json_search_str.rfind('}')
+        
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            json_str = json_search_str[start_idx : end_idx + 1]
+        else:
+            json_str = None
             
         if json_str:
-            # 2. Robust Cleanup (Control characters break both json.loads and ast.literal_eval)
+            # 3. Robust Cleanup (Control characters break both json.loads and ast.literal_eval)
             control_char_re = re.compile(r'[\x00-\x1F\x7F-\x9F]', flags=re.UNICODE)
             cleaned_str = control_char_re.sub('', json_str).strip()
             
