@@ -6,7 +6,7 @@ import os
 import numpy as np
 from io import StringIO
 import time
-import vllm # Import vllm to find its path
+# We use lazy imports for vllm inside methods to save RAM
 
 # This is the "DEFAULT_CONFIG" your agent will be tuning
 DEFAULT_CONFIG = {
@@ -22,21 +22,23 @@ class BenchmarkWorker:
         self.ncu_log_path = f"/tmp/hakt_ncu_log_gpu{self.gpu_id}_{pid}.csv"
         self.temp_config_path = f"/tmp/hakt_temp_config_gpu{self.gpu_id}_{pid}.json"
         
-        # --- REVISION ---
-        # Find the vLLM default config path dynamically
         try:
+            import vllm
             vllm_lib_path = os.path.dirname(vllm.__file__)
             self.vllm_config_dir = os.path.join(
                 vllm_lib_path, "model_executor/layers/fused_moe/configs/"
             )
             os.makedirs(self.vllm_config_dir, exist_ok=True)
             print(f"[BenchmarkWorker] vLLM config path set to: {self.vllm_config_dir}")
+            del vllm 
         except Exception as e:
             print(f"[BenchmarkWorker] WARNING: Could not find vLLM path. {e}")
-            # Fallback to user's hard-coded path from log
-            self.vllm_config_dir = "~/vllmC/vllm/vllm/model_executor/layers/fused_moe/configs/"
+            self.vllm_config_dir = "/tmp/vllm_configs/" 
+            os.makedirs(self.vllm_config_dir, exist_ok=True)
             
-        print(f"[BenchmarkWorker] Initialized on GPU {self.gpu_id} (PID: {pid})")
+        print(f"[BenchmarkWorker] Initialized on PHYSICAL GPU {self.gpu_id} (PID: {pid})")
+        # Note: The actor process itself runs on a *logical* GPU assigned by Ray.
+        # The `self.gpu_id` (e.g., 7) is used to pin *subprocesses*.
 
     def get_gpu_id(self):
         return self.gpu_id
@@ -47,25 +49,24 @@ class BenchmarkWorker:
         Returns (state, reward, csv_data)
         """
         
-        # 1. Set the kernel config
         config_to_use = params_dict if params_dict else DEFAULT_CONFIG
         with open(self.temp_config_path, "w") as f:
             json.dump(config_to_use, f)
 
-        # 2. Build NCU Command
         ncu_command = [
             "ncu", "--csv",
-            "--kernel-name", static_args['kernel_name'],
+            # --- FIX #1: Use regex to find the kernel ---
+            "--kernel-name-regex", static_args['kernel_name'],
+            # --- End Fix ---
             "--metrics", "sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed,lts__t_sector_hit_rate.pct,l1tex__t_sector_hit_rate.pct",
             "--target-processes", "all",
             "--force-overwrite",
             "--log-file", self.ncu_log_path,
         ]
 
-        # 3. Build Python Command
         python_command = [
             "python", static_args['run_script_path'],
-            "--config-path", self.temp_config_path, # Tell script where to find config
+            "--config-path", self.temp_config_path,
             "--num-experts", str(static_args['num_experts']),
             "--top-k", str(static_args['top_k']),
             "--hidden-size", str(static_args['hidden_size']),
@@ -76,19 +77,18 @@ class BenchmarkWorker:
         ]
         
         full_command = ncu_command + python_command
-        
-        # 4. Set CUDA_VISIBLE_DEVICES for this subprocess
         env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
+        # This is critical: pin the *subprocess* to the physical worker GPU
+        env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id) 
 
         try:
             subprocess.run(full_command, check=True, capture_output=True, text=True, timeout=30, env=env)
         except subprocess.CalledProcessError as e:
-            print(f"[BenchmarkWorker] ERROR: NCU run failed on GPU {self.gpu_id}. {e.stderr}")
-            return None, -100.0, None # Return failure
+            print(f"[BenchmarkWorker] ERROR: NCU run failed on GPU {self.gpu_id}. STDERR:\n{e.stderr}")
+            return None, -100.0, None 
         except subprocess.TimeoutExpired:
             print(f"[BenchmarkWorker] ERROR: NCU run timed out on GPU {self.gpu_id}.")
-            return None, -100.0, None # Return failure
+            return None, -100.0, None
 
         # 5. Parse the ncu_log.csv
         try:
@@ -99,16 +99,23 @@ class BenchmarkWorker:
                 metrics = {'sm': [], 'dram': [], 'l1': [], 'l2': []}
                 row_count = 0
                 for row in csv_reader:
-                    if row['sm__throughput.avg.pct_of_peak_sustained_elapsed'] == 'nan':
+                    # This try-except block handles malformed rows
+                    try:
+                        metrics['sm'].append(float(row['sm__throughput.avg.pct_of_peak_sustained_elapsed']))
+                        metrics['dram'].append(float(row['dram__throughput.avg.pct_of_peak_sustained_elapsed']))
+                        metrics['l1'].append(float(row['l1tex__t_sector_hit_rate.pct']))
+                        metrics['l2'].append(float(row['lts__t_sector_hit_rate.pct']))
+                        row_count += 1
+                    except (KeyError, ValueError, TypeError):
+                        # This row is malformed, skip it
+                        print(f"[BenchmarkWorker] WARNING: Skipping malformed NCU row: {row}")
                         continue
-                    metrics['sm'].append(float(row['sm__throughput.avg.pct_of_peak_sustained_elapsed']))
-                    metrics['dram'].append(float(row['dram__throughput.avg.pct_of_peak_sustained_elapsed']))
-                    metrics['l1'].append(float(row['l1tex__t_sector_hit_rate.pct']))
-                    metrics['l2'].append(float(row['lts__t_sector_hit_rate.pct']))
-                    row_count += 1
                 
+                # --- FIX #2: Add check for empty (but valid) CSV ---
+                # This happens if ncu runs but finds no kernels matching the regex
                 if row_count == 0:
-                    raise Exception("NCU output was empty or contained only 'nan' rows.")
+                    raise Exception(f"NCU ran but found 0 valid kernels matching regex '{static_args['kernel_name']}'.")
+                # --- End Fix ---
 
                 state = np.array([
                     np.mean(metrics['sm']),
@@ -122,7 +129,7 @@ class BenchmarkWorker:
 
         except Exception as e:
             print(f"[BenchmarkWorker] ERROR: NCU CSV parsing failed on GPU {self.gpu_id}. {e}")
-            return None, -100.0, None # Return failure
+            return None, -100.0, None
 
     def _calculate_reward(self, state, reward_weights):
         sm, dram, l1, l2 = state
@@ -137,24 +144,26 @@ class BenchmarkWorker:
     def run_slow_gym_validation(self, params_dict, model_name, user_goal):
         """
         Runs the 'Slow Gym' (vllm bench) on this worker's GPU (GPU 1).
-        This is now revised based on your logs.
         """
         
-        # --- REVISION ---
-        # 1. Create the *exact* filename vLLM is looking for.
-        #    We get E and N from the *correct* static args.
-        E = self.static_args['num_experts']    # 128
-        N = self.static_args['inter_size'] // 2 # 1536 // 2 = 768
+        try:
+            import vllm
+        except ImportError:
+            print("[BenchmarkWorker] ERROR: vLLM not found in worker process.")
+            return 0.0
+        except Exception as e:
+            print(f"[BenchmarkWorker] ERROR: vLLM import failed in worker. {e}")
+            return 0.0
+
+        E = STATIC_ARGS_FOR_HAKT['num_experts']    
+        N = STATIC_ARGS_FOR_HAKT['inter_size'] // 2 
         
-        # We assume H100 based on your logs.
         config_filename = f"E={E},N={N},device_name=NVIDIA_H100_80GB_HBM3.json" 
         config_path = os.path.join(self.vllm_config_dir, config_filename)
         
-        # 2. Write the config file to the *default* vLLM path.
-        #    vLLM expects { "batch_size_str": { "config": ... } }
         vllm_config_data = { 
-            "16088": params_dict, # Use our fast-gym batch size as the key
-            "default": params_dict  # Add a default
+            "16088": params_dict, 
+            "default": params_dict  
         }
         
         try:
@@ -163,22 +172,19 @@ class BenchmarkWorker:
             print(f"[BenchmarkWorker] Wrote config to vLLM default path: {config_path}")
         except Exception as e:
             print(f"[BenchmarkWorker] ERROR: Failed to write vLLM config file. {e}")
-            return 0.0 # Return failure
+            return 0.0
             
-        # 3. Set the correct GPU for the subprocess
         env = os.environ.copy()
+        # This is critical: pin the *subprocess* to the physical worker GPU
         env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
-        # We NO LONGER need VLLM_TUNED_CONFIG_FOLDER
 
-        # 4. Run the "Slow Gym" (vllm bench)
-        #    This command is based on *your* successful log.
         command = [
             "python", "-m", "vllm.entrypoints.cli.main", "bench", "throughput",
             "--model", model_name,
-            "--dataset-path", "ShareGPT_Vicuna_unfiltered.json", # From your log
-            "--num-prompts", "200", # Shorter than your test, but still valid
+            "--dataset-path", "ShareGPT_Vicuna_unfiltered.json", 
+            "--num-prompts", "200", 
             "--trust-remote-code",
-            "--enforce-eager", # Crucial: ensures our kernel is used
+            "--enforce-eager", 
             "--tensor-parallel-size", "1"
         ]
         
@@ -188,36 +194,27 @@ class BenchmarkWorker:
                 command, env=env, check=True, capture_output=True, text=True, timeout=300
             ).stdout
             
-            # 5. Parse the system-level metric
             metric = self._parse_vllm_bench_output(output, user_goal)
             print(f"[BenchmarkWorker] Slow Gym Result: {metric} tokens/sec")
             
-            # 6. Clean up the config file
             os.remove(config_path)
-            
             return metric
 
         except Exception as e:
             print(f"[BenchmarkWorker] ERROR: vllm bench failed on GPU {self.gpu_id}. {e}")
-            # Clean up the config file even on failure
             if os.path.exists(config_path):
                 os.remove(config_path)
-            return 0.0 # Return failure
+            return 0.0
 
     def _parse_vllm_bench_output(self, output, goal):
-        # --- REVISION ---
-        # This parses the "throughput" benchmark output, not "serve"
         for line in output.strip().split('\n'):
             if goal == 'throughput' and line.startswith("Throughput:"):
-                # Line is "Throughput: 25.78 requests/s, 11076.96 total tokens/s, 5319.96 output tokens/s"
                 try:
                     parts = line.split(',')
                     output_tok_s = parts[2].strip().split(' ')[0]
                     return float(output_tok_s)
                 except Exception:
                     continue
-            # Add a latency parser if needed
             
-        print(f"[BenchmarkWorker] ERROR: Could not parse vllm bench output.")
-
+        print(f"[BenchmarkWorker] ERROR: Could not parse vllM bench output.")
         return 0.0
