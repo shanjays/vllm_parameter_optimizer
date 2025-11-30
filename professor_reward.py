@@ -4,6 +4,7 @@ import numpy as np
 import time
 import torch
 import os
+import re # <-- New dependency for robust parsing
 from fast_gym_env import FastGymEnv
 from fighter_agent import FighterPilot
 from benchmark_worker import BenchmarkWorker
@@ -23,11 +24,6 @@ class HAKT_Reward_Function:
         
         print(f"[RewardFn] Requesting BenchmarkWorker for PHYSICAL GPU {worker_gpu_id}")
 
-        # The BenchmarkWorker actor will be requested from Ray's pool.
-        # We pass the worker_gpu_id (e.g., 7) to its constructor.
-        # The actor *itself* will use 1 GPU from Ray's pool (e.g., GPU 1),
-        # but its *subprocess work* (ncu, vllm bench) will be pinned
-        # to the physical GPU ID (7) that we pass in.
         self.worker = BenchmarkWorker.options(
             num_gpus=1, # Request 1 GPU from Ray's pool *for the actor process*
         ).remote(worker_gpu_id) # Pass the PHYSICAL ID (7) as an argument
@@ -62,7 +58,8 @@ class HAKT_Reward_Function:
                 
                 plan_file_path = f"temp_mission_plan_{int(time.time())}.json"
                 with open(plan_file_path, "w") as f:
-                    json.dump(plan, f)
+                    # The JSON object is now guaranteed to be clean by _extract_json
+                    json.dump(plan, f, indent=2)
                     
                 print(f"[RewardFn] Starting 'Fast Loop' PPO training...")
                 top_5_configs = self._run_fast_loop(plan_file_path)
@@ -81,32 +78,53 @@ class HAKT_Reward_Function:
         return rewards
 
     def _extract_json(self, llm_output_str):
-        """Extracts the JSON plan from the LLM's completion."""
-        try:
-            # Robust parsing to handle reasoning text around the JSON block
-            start_marker = llm_output_str.find('```json')
-            if start_marker != -1:
-                start_marker += 7
-                end_marker = llm_output_str.rfind('```')
-                json_str = llm_output_str[start_marker:end_marker].strip()
-            else:
-                # Fallback to finding the first { and last }
-                json_str = llm_output_str[llm_output_str.find('{'):llm_output_str.rfind('}') + 1]
-
-            return json.loads(json_str.strip())
+        """
+        Extracts the JSON plan from the LLM's completion using a robust regex.
+        This handles surrounding text, control characters, and markdown ticks.
+        """
+        # --- NEW ROBUST FIX ---
+        
+        # 1. Regex to find the JSON block, optionally enclosed in ```json or ```
+        # It handles optional newlines/whitespace around the block
+        # The '(?s)' makes '.' match newlines, '.*?' is non-greedy
+        match = re.search(r"```json\s*(.*?)\s*```|(\s*\{.*\}\s*)", llm_output_str, re.DOTALL)
+        
+        json_str = None
+        if match:
+            # Use the content of the first successful group capture (1 or 2)
+            json_str = match.group(1) or match.group(2)
             
-        except Exception as e:
-            print(f"ERROR parsing LLM JSON: {e}")
-            # Return a safe, penalized plan on failure
-            return {"reward_function": {}, "pruned_action_space": {
-                "BLOCK_SIZE_M": [64], "BLOCK_SIZE_N": [64], "BLOCK_SIZE_K": [32],
-                "num_warps": [4], "num_stages": [4]}
-            }
+        if json_str is None:
+            # Fallback to finding the first { and last } (original method, but less reliable)
+            start_idx = llm_output_str.find('{')
+            end_idx = llm_output_str.rfind('}')
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                json_str = llm_output_str[start_idx : end_idx + 1]
+            
+        if json_str:
+            # 2. Try to load the found string
+            try:
+                # Remove common invalid control characters (like stray backslashes) that confuse the parser
+                cleaned_str = json_str.replace('\\', '').replace('\n', ' ').strip()
+                return json.loads(cleaned_str)
+            except json.JSONDecodeError as e:
+                # If the first attempt fails, try a slightly less aggressive clean (remove only newlines)
+                try:
+                    cleaned_str = json_str.replace('\n', ' ').strip()
+                    return json.loads(cleaned_str)
+                except json.JSONDecodeError:
+                    raise e # Re-raise the original error if both fail
 
+        # --- END NEW ROBUST FIX ---
+        
+        # If no JSON was found or parsing failed, we hit this final except block
+        raise json.JSONDecodeError("No valid JSON structure found in LLM output.", llm_output_str, 0)
+            
     def _run_fast_loop(self, mission_plan_path):
         """
         Runs the *entire* PPO training loop for the "Fighter Pilot".
         """
+        # The imports for FastGymEnv and FighterPilot are correct at the top of the file
         env = FastGymEnv(
             mission_plan_path=mission_plan_path,
             benchmark_worker=self.worker,
@@ -117,6 +135,7 @@ class HAKT_Reward_Function:
         epoch_log_dir = f"./hakt_logs/run_{int(time.time())}/"
         pilot = FighterPilot(env, log_dir=epoch_log_dir)
         
+        print(f"[{pilot.__class__.__name__}] Training on {pilot.device} for {self.fast_loop_steps} steps...")
         pilot.train_epoch(steps=self.fast_loop_steps)
         
         top_results = env.get_top_results(n=5)
