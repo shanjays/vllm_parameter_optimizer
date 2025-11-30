@@ -153,6 +153,18 @@ class HAKT_Reward_Function:
         # Remove control characters
         cleaned_str = control_char_re.sub('', cleaned_str).strip()
         
+        # --- FINAL FIX: FORCE CLOSURE (Fixes "SyntaxError: '{' was never closed") ---
+        # Count open and close braces
+        open_braces = cleaned_str.count('{')
+        close_braces = cleaned_str.count('}')
+        
+        if open_braces > close_braces:
+            needed_braces = open_braces - close_braces
+            # Append the required number of closing braces to syntactically complete the string
+            cleaned_str += '}' * needed_braces
+            print(f"DEBUG: Appended {needed_braces} closing brace(s) for forced closure.")
+        # --- END FINAL FIX ---
+        
         # --- HYBRID PARSING FIX ---
         
         # Try 1: Strict JSON parsing (best for clean output)
