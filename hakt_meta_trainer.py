@@ -8,7 +8,7 @@ from datasets import Dataset
 
 # --- THIS IS THE FIX ---
 # We no longer import BitsAndBytesConfig
-from transformers import TrainingArguments, AutoTokenizer, AutoModelForCausalLM
+from transformers import TrainingArguments, AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 # We must import the *native* GRPOTrainer and GRPOConfig
 from trl import GRPOTrainer, GRPOConfig
@@ -117,12 +117,24 @@ def main():
 
     max_seq_length = 2048
     print(f"[HAKT] Loading Professor LLM '{PROFESSOR_MODEL}' onto GPU 0 (Logical)...")
+
+    # --- THIS IS THE FIX for Villain #2 (OOM Crash) ---
+    # We are *forcing* transformers to use bitsandbytes to load in 4-bit,
+    # overriding the model's native (but failing) Mxfp4Config.
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.bfloat16
+    )
     
     professor_llm = AutoModelForCausalLM.from_pretrained(
         PROFESSOR_MODEL,
+        quantization_config=quantization_config, # Force 4-bit
         device_map="auto", 
         trust_remote_code=True,
     )
+    # --- END FIX ---
     
     tokenizer = AutoTokenizer.from_pretrained(PROFESSOR_MODEL)
     if tokenizer.pad_token is None:
@@ -185,9 +197,7 @@ Generate the JSON plan:
     grpo_config = GRPOConfig(
         # TrainingArguments
         output_dir="hakt_professor_finetune",
-        # --- THIS IS THE FIX for the ValueError ---
         per_device_train_batch_size=4, # Must be >= num_generations
-        # --- END FIX ---
         gradient_accumulation_steps=1,
         learning_rate=2e-5, 
         num_train_epochs=1, 
@@ -212,8 +222,8 @@ Generate the JSON plan:
         args=grpo_config, 
         train_dataset=dataset,
         reward_funcs=[hakt_reward_function_wrapper],
-        # The tokenizer is passed *inside* the model object
-        # or it will be loaded from the model name
+        tokenizer=tokenizer, # Tokenizer *is* needed for native TRL
+        peft_config=peft_config, # Pass the PEFT config
     )
     # --- END FIX ---
 
