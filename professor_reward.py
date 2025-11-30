@@ -127,11 +127,11 @@ class HAKT_Reward_Function:
         Extracts the JSON plan from the LLM's completion using robust hybrid parsing.
         """
         
-        # --- FIX 1: Universal Character Scrubbing (Fixes 'invalid character ‑ (U+2011)') ---
+        # --- FIX 1: Universal Character Scrubbing (Fixes 'invalid character ‑ (U+2011)' and '≈') ---
         # Replace common non-standard Unicode characters with their ASCII equivalents
-        # This fixes issues like non-breaking hyphens used by LLMs (U+2011)
-        llm_output_str = llm_output_str.replace('\u2011', '-') 
+        llm_output_str = llm_output_str.replace('\u2011', '-') # Non-breaking hyphen
         llm_output_str = llm_output_str.replace('\u202f', ' ') # Narrow non-breaking space
+        llm_output_str = llm_output_str.replace('\u2248', '~') # Approximately Equal To (≈)
         
         # 1. Use greedy regex to find the entire content between the first { and the last }
         # This handles the case where the LLM starts with reasoning text or ends abruptly.
@@ -188,11 +188,7 @@ class HAKT_Reward_Function:
         epoch_log_dir = f"./hakt_logs/run_{int(time.time())}/"
         pilot = FighterPilot(env, log_dir=epoch_log_dir)
         
-        # --- FIX: Remove the manual device print that was causing the duplicate/unknown log ---
         # We rely solely on the PPO agent's internal logging now.
-        # device_name = getattr(pilot, 'device', 'unknown device') # <-- REMOVED
-        # print(f"[{pilot.__class__.__name__}] Training on {device_name} for {self.fast_loop_steps} steps...") # <-- REMOVED
-        # --- END FIX ---
         
         pilot.train_epoch(steps=self.fast_loop_steps)
         
