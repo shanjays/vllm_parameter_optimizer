@@ -167,6 +167,7 @@ class HAKT_Reward_Function:
             return ast.literal_eval(cleaned_str)
         except (SyntaxError, ValueError, json.JSONDecodeError) as e:
             # This catches the ':' expected error, unterminated string literal, etc.
+            # Log the error and the problematic string portion
             print(f"ERROR parsing LLM JSON: {e} --- Failing String: {cleaned_str[:120]}...")
             raise e # Raise the last error encountered
 
@@ -187,10 +188,10 @@ class HAKT_Reward_Function:
         epoch_log_dir = f"./hakt_logs/run_{int(time.time())}/"
         pilot = FighterPilot(env, log_dir=epoch_log_dir)
         
-        # --- FIX: Log the device attribute correctly, assuming PPO is functional ---
-        # The 'device' attribute is only available after initialization.
-        device_name = getattr(pilot, 'device', 'unknown device') 
-        print(f"[{pilot.__class__.__name__}] Training on {device_name} for {self.fast_loop_steps} steps...")
+        # --- FIX: Remove the manual device print that was causing the duplicate/unknown log ---
+        # We rely solely on the PPO agent's internal logging now.
+        # device_name = getattr(pilot, 'device', 'unknown device') # <-- REMOVED
+        # print(f"[{pilot.__class__.__name__}] Training on {device_name} for {self.fast_loop_steps} steps...") # <-- REMOVED
         # --- END FIX ---
         
         pilot.train_epoch(steps=self.fast_loop_steps)
