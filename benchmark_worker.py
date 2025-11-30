@@ -51,7 +51,14 @@ class BenchmarkWorker:
         Returns (state, reward, csv_data)
         """
         
-        config_to_use = params_dict if params_dict else DEFAULT_CONFIG
+        # --- THIS IS THE FIX for Villain #3 (GROUP_SIZE_M) ---
+        # 1. Start with the complete default config
+        config_to_use = DEFAULT_CONFIG.copy()
+        if params_dict:
+            # 2. Update it with the PPO agent's chosen parameters
+            config_to_use.update(params_dict)
+        # --- END FIX ---
+            
         with open(self.temp_config_path, "w") as f:
             json.dump(config_to_use, f)
 
@@ -74,7 +81,7 @@ class BenchmarkWorker:
             "--num-tokens", str(static_args['num_tokens']),
             "--dtype", static_args['dtype'],
             "--num-iters", str(static_args['num_iters']),
-            "--num-warmup-iters", "1", # This argument was missing
+            "--num-warmup-iters", "1", 
         ]
         
         full_command = ncu_command + python_command
@@ -90,7 +97,7 @@ class BenchmarkWorker:
             print(f"[BenchmarkWorker] ERROR: NCU run timed out on GPU {self.gpu_id}.")
             return None, -100.0, None
 
-        # --- THIS IS THE FIX: Robust "Long Format" CSV Parsing ---
+        # --- THIS IS THE FIX for Villain #1 (CSV Parser) ---
         try:
             csv_data = ""
             # We will group metrics by Kernel Name and Invocation ID
@@ -139,7 +146,8 @@ class BenchmarkWorker:
                             kernel_invocations[invocation_key]['l2'] = metric_value
                             
                     except (KeyError, ValueError, TypeError) as e:
-                        print(f"[BenchmarkWorker] WARNING: Skipping malformed/unexpected NCU row. Error: {e}. Row: {row}")
+                        # This warning is normal for garbage lines
+                        # print(f"[BenchmarkWorker] WARNING: Skipping malformed/unexpected NCU row. Error: {e}. Row: {row}")
                         continue
             
             # 3. Now, aggregate the metrics from all valid invocations
