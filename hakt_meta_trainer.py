@@ -56,7 +56,7 @@ def get_initial_profile_data():
     
     command = [
         "ncu", "--csv",
-        "--kernel-name-regex", KERNEL_TO_TUNE, 
+        "--kernel-name", KERNEL_TO_TUNE, 
         "--metrics", "sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed,lts__t_sector_hit_rate.pct,l1tex__t_sector_hit_rate.pct",
         "--target-processes", "all",
         "--force-overwrite",
@@ -212,3 +212,4 @@ Generate the JSON plan:
 
 if __name__ == "__main__":
     main()
+
