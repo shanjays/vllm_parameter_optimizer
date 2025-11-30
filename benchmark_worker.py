@@ -56,6 +56,12 @@ class BenchmarkWorker:
         if params_dict:
             config_to_use.update(params_dict)
         # --- END FIX ---
+        
+        # Validate num_warps is a power of 2
+        num_warps = config_to_use.get('num_warps', 4)
+        if num_warps <= 0 or (num_warps & (num_warps - 1)) != 0:
+            print(f"[BenchmarkWorker] WARNING: Invalid num_warps={num_warps}, using 4")
+            config_to_use['num_warps'] = 4
             
         with open(self.temp_config_path, "w") as f:
             json.dump(config_to_use, f)

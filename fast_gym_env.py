@@ -62,11 +62,18 @@ class FastGymEnv(gym.Env):
     def _action_to_params(self, action):
         """Converts an action (indices) into a kernel config dict."""
         try:
+            num_warps_val = self.pruned_space['num_warps'][action[3]]
+            
+            # Validate num_warps is a power of 2
+            if num_warps_val <= 0 or (num_warps_val & (num_warps_val - 1)) != 0:
+                print(f"[FastGymEnv] WARNING: Invalid num_warps={num_warps_val}, using 4")
+                num_warps_val = 4  # Default to valid power of 2
+            
             return {
                 "BLOCK_SIZE_M": self.pruned_space['BLOCK_SIZE_M'][action[0]],
                 "BLOCK_SIZE_N": self.pruned_space['BLOCK_SIZE_N'][action[1]],
                 "BLOCK_SIZE_K": self.pruned_space['BLOCK_SIZE_K'][action[2]],
-                "num_warps": self.pruned_space['num_warps'][action[3]],
+                "num_warps": num_warps_val,
                 "num_stages": self.pruned_space['num_stages'][action[4]],
             }
         except IndexError as e:
