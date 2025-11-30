@@ -185,7 +185,9 @@ Generate the JSON plan:
     grpo_config = GRPOConfig(
         # TrainingArguments
         output_dir="hakt_professor_finetune",
-        per_device_train_batch_size=1, 
+        # --- THIS IS THE FIX for the ValueError ---
+        per_device_train_batch_size=4, # Must be >= num_generations
+        # --- END FIX ---
         gradient_accumulation_steps=1,
         learning_rate=2e-5, 
         num_train_epochs=1, 
