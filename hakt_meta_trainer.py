@@ -14,7 +14,7 @@ from professor_reward import HAKT_Reward_Function # The "Slow Loop" reward
 AGENT_GPU_ID = 0  # Physical ID for Professor/Fighter
 WORKER_GPU_ID = 7 # Physical ID for BenchmarkWorker
 
-PROFESSOR_MODEL = "gpt-oss-20b" 
+PROFESSOR_MODEL = "openai/gpt-oss-20b" 
 USER_GOAL = "throughput" 
 MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507" 
 KERNEL_TO_TUNE = "fused_moe_kernel"
@@ -200,4 +200,5 @@ Generate the JSON plan:
     print("[HAKT] System shutdown complete.")
 
 if __name__ == "__main__":
+
     main()
