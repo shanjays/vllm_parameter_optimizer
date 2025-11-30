@@ -4,7 +4,8 @@ import numpy as np
 import time
 import torch
 import os
-import re # <-- New dependency for robust parsing
+import re 
+import ast # <-- NEW: Python Abstract Syntax Tree
 from fast_gym_env import FastGymEnv
 from fighter_agent import FighterPilot
 from benchmark_worker import BenchmarkWorker
@@ -79,16 +80,15 @@ class HAKT_Reward_Function:
 
     def _extract_json(self, llm_output_str):
         """
-        Extracts the JSON plan from the LLM's completion using a robust regex and cleaning.
+        Extracts the JSON plan from the LLM's completion using robust regex and ast.literal_eval.
         """
         
-        # 1. Regex to find the JSON block, optionally enclosed in ```json or ```
-        # It handles optional newlines/whitespace around the block
+        # 1. Regex to find the JSON block, optionally enclosed in markdown ticks (```json or ```)
+        # We also look for the plain dictionary format.
         match = re.search(r"```json\s*(.*?)\s*```|(\s*\{.*\}\s*)", llm_output_str, re.DOTALL)
         
         json_str = None
         if match:
-            # Use the content of the first successful group capture (1 or 2)
             json_str = match.group(1) or match.group(2)
             
         if json_str is None:
@@ -99,42 +99,25 @@ class HAKT_Reward_Function:
                 json_str = llm_output_str[start_idx : end_idx + 1]
             
         if json_str:
-            # --- FINAL ROBUST CLEANUP ---
-            # 2a. Remove invalid control characters (ASCII characters < 32, except tabs/newlines)
-            # This fixes the "Invalid control character" error
+            # 2. Robust Cleanup
+            # Remove invalid control characters (ASCII characters < 32, except tabs/newlines)
             control_char_re = re.compile(r'[\x00-\x1F\x7F-\x9F]', flags=re.UNICODE)
             cleaned_str = control_char_re.sub('', json_str).strip()
             
-            # 2b. Safely replace single quotes with double quotes for keys and string values
-            # This is a critical fix. We use a regex to ONLY replace single quotes
-            # that are adjacent to a comma, colon, bracket, or curly brace (i.e., keys/values).
-            # This preserves quotes inside string content (e.g., "It's").
-            def replace_single_quotes(match):
-                # We only replace if the matched pattern is not part of a string value (this is complex)
-                # Simpler: We rely on the LLM generating dicts where keys/values use single quotes.
-                s = match.group(0)
-                # Match single quotes that are followed by a colon or comma (likely dict keys)
-                if re.match(r"'\s*:", s) or re.match(r"'\s*[,}]", s):
-                    return s.replace("'", '"')
-                return s
-
-            # Use simple string replace for full coverage, assuming the LLM doesn't put single quotes in values
-            # This is the safest way to ensure all dictionary keys/values are double-quoted.
-            cleaned_str = cleaned_str.replace("'", '"')
-            
-            # 2c. Fix common JSON trailing commas
-            cleaned_str = re.sub(r',\s*([\]\}])', r'\1', cleaned_str)
-            
-            # 3. Try to load the found string
+            # 3. Use ast.literal_eval to safely parse Python dicts (allows single quotes, etc.)
             try:
-                return json.loads(cleaned_str)
-            except json.JSONDecodeError as e:
+                # ast.literal_eval returns a Python dict
+                python_dict = ast.literal_eval(cleaned_str)
+                # We return the dict, which json.dump() can safely convert to strict JSON later
+                return python_dict
+                
+            except (SyntaxError, ValueError, json.JSONDecodeError) as e:
+                # Catch any failure from parsing
                 print(f"ERROR parsing LLM JSON: {e}")
-                # Re-raise with the error message
                 raise e
 
-        # If no JSON was found, we raise the final error
-        raise json.JSONDecodeError("No valid JSON structure found in LLM output.", llm_output_str, 0)
+        # If no JSON was found after all attempts
+        raise ValueError("No valid JSON structure found in LLM output.")
             
     def _run_fast_loop(self, mission_plan_path):
         """
