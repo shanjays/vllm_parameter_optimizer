@@ -7,8 +7,8 @@ import time
 from datasets import Dataset
 
 # --- THIS IS THE FIX ---
-# We no longer import BitsAndBytesConfig
-from transformers import TrainingArguments, AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+# We no longer import BitsAndBytesConfig OR pass it to the model
+from transformers import TrainingArguments, AutoTokenizer, AutoModelForCausalLM
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 # We must import the *native* GRPOTrainer and GRPOConfig
 from trl import GRPOTrainer, GRPOConfig
@@ -118,19 +118,13 @@ def main():
     max_seq_length = 2048
     print(f"[HAKT] Loading Professor LLM '{PROFESSOR_MODEL}' onto GPU 0 (Logical)...")
 
-    # --- THIS IS THE FIX for Villain #2 (OOM Crash) ---
-    # We are *forcing* transformers to use bitsandbytes to load in 4-bit,
-    # overriding the model's native (but failing) Mxfp4Config.
-    quantization_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_compute_dtype=torch.bfloat16
-    )
+    # --- THIS IS THE FIX ---
+    # The BitsAndBytesConfig object was removed.
+    # We are now letting transformers load the model's native Mxfp4Config.
     
     professor_llm = AutoModelForCausalLM.from_pretrained(
         PROFESSOR_MODEL,
-        quantization_config=quantization_config, # Force 4-bit
+        # We REMOVED the 'quantization_config=...' line
         device_map="auto", 
         trust_remote_code=True,
     )
@@ -142,6 +136,7 @@ def main():
 
     print("[HAKT] Adding LoRA adapters to Professor LLM...")
     
+    # We *still* need to prepare the k-bit model for training
     professor_llm = prepare_model_for_kbit_training(professor_llm)
     
     peft_config = LoraConfig(
@@ -192,8 +187,7 @@ Generate the JSON plan:
     def hakt_reward_function_wrapper(completions, **kwargs):
         return reward_fn_object(completions, **kwargs)
 
-    # --- THIS IS THE FIX: The 'native' TRL GRPOTrainer API ---
-    # 1. We merge all TrainingArguments *into* the GRPOConfig
+    # We merge all TrainingArguments *into* the GRPOConfig
     grpo_config = GRPOConfig(
         # TrainingArguments
         output_dir="hakt_professor_finetune",
@@ -215,8 +209,7 @@ Generate the JSON plan:
         loss_type="grpo", 
     )
 
-    # 2. The native GRPOTrainer takes 'args=grpo_config'
-    #    and does *not* take 'tokenizer', 'peft_config', or **kwargs
+    # The native GRPOTrainer takes 'args=grpo_config'
     trainer = GRPOTrainer(
         model=professor_llm,
         args=grpo_config, 
@@ -225,7 +218,6 @@ Generate the JSON plan:
         tokenizer=tokenizer, # Tokenizer *is* needed for native TRL
         peft_config=peft_config, # Pass the PEFT config
     )
-    # --- END FIX ---
 
     print("\n--- [HAKT] Starting 'Slow Loop' Training for Professor LLM ---")
     trainer.train()
