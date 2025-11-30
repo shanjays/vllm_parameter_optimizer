@@ -31,7 +31,7 @@ STATIC_ARGS_FOR_HAKT = {
     "hidden_size": 6144,
     "inter_size": 1536,
     "dtype": "fp16",
-    "num_iters": 0
+    "num_iters": 1
 }
 
 FULL_PARAM_SPACE = {
@@ -205,4 +205,5 @@ Generate the JSON plan:
 
 if __name__ == "__main__":
     main()
+
 
