@@ -19,8 +19,8 @@ from trl import GRPOTrainer, GRPOConfig
 
 from professor_reward import HAKT_Reward_Function
 
-AGENT_GPU_ID = 0
-WORKER_GPU_ID = 7
+AGENT_GPU_ID = 7
+WORKER_GPU_ID = 0
 
 # --- THIS IS THE FIX ---
 # We must use an Unsloth-optimized model name.
@@ -292,3 +292,4 @@ Analyze the NCU metrics and generate an optimized mission plan for the {KERNEL_T
 
 if __name__ == "__main__":
     main()
+
