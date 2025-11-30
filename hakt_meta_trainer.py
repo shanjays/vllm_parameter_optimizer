@@ -14,18 +14,17 @@ from professor_reward import HAKT_Reward_Function # The "Slow Loop" reward
 AGENT_GPU_ID = 0  # Physical ID for Professor/Fighter
 WORKER_GPU_ID = 7 # Physical ID for BenchmarkWorker
 
-PROFESSOR_MODEL = "openai/gpt-oss-20b" 
+PROFESSOR_MODEL = "gpt-oss-20b" 
 USER_GOAL = "throughput" 
 MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507" 
-KERNEL_TO_TUNE = "fused_moe_kernel"
+KERNEL_TO_TUNE = "fused_moe_kernel" # We will use this for regex matching
 RUN_SCRIPT_PATH = "run_moe_gym.py" 
 FAST_LOOP_STEPS = 100 
 LLM_TRAIN_STEPS = 50  
 
-# Use the correct kernel parameters from our previous logs (E=128, N=768)
 STATIC_ARGS_FOR_HAKT = {
     "run_script_path": RUN_SCRIPT_PATH,
-    "kernel_name": KERNEL_TO_TUNE,
+    "kernel_name": KERNEL_TO_TUNE, # Note: This is now a regex pattern
     "num_tokens": 16088,
     "num_experts": 128,
     "top_k": 2,
@@ -51,15 +50,15 @@ def get_initial_profile_data():
     """
     print("[HAKT] Running initial profile (pre-flight check)...")
     env = os.environ.copy()
-    
-    # --- REVISION: Pin subprocess to the PHYSICAL worker GPU ---
     env["CUDA_VISIBLE_DEVICES"] = str(WORKER_GPU_ID) 
     
     ncu_log_file = "initial_profile.csv"
     
     command = [
         "ncu", "--csv",
-        "--kernel-name", KERNEL_TO_TUNE,
+        # --- FIX #1: Use regex to find the kernel ---
+        "--kernel-name-regex", KERNEL_TO_TUNE, 
+        # --- End Fix ---
         "--metrics", "sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed,lts__t_sector_hit_rate.pct,l1tex__t_sector_hit_rate.pct",
         "--target-processes", "all",
         "--force-overwrite",
@@ -90,18 +89,12 @@ def get_initial_profile_data():
         raise
 
 def main():
-    # This runs *before* Ray is initialized, which is correct.
     initial_ncu_report = get_initial_profile_data()
 
-    # --- REVISION: This is the *ONLY* place ray.init() should be called ---
-    # We use ignore_reinit_error=True just to be 100% safe.
     if not ray.is_initialized():
         ray.init(ignore_reinit_error=True)
     
-    # --- REVISION: Pin the MAIN process to the AGENT_GPU_ID ---
-    # This script (Unsloth, PPO) will *only* see this one GPU.
     os.environ["CUDA_VISIBLE_DEVICES"] = str(AGENT_GPU_ID)
-    # PyTorch will now see this GPU as logical "0"
     torch.cuda.set_device(0) 
     
     print(f"[HAKT] Main process (Professor/Fighter) pinned to Physical GPU: {AGENT_GPU_ID}")
@@ -113,7 +106,7 @@ def main():
         model_name=PROFESSOR_MODEL,
         max_seq_length=max_seq_length,
         load_in_4bit=True,
-        device_map="auto", # Will place on logical GPU 0
+        device_map="auto", 
     )
 
     print("[HAKT] Adding LoRA adapters to Professor LLM...")
@@ -133,7 +126,7 @@ def main():
 You are HAKT, a 'Kevin-style' CUDA tuning expert.
 The user's high-level goal is: **{USER_GOAL}**
 The hardware is: **NVIDIA H100**
-The target kernel is: **{KERNEL_TO_TUNE} (E=128, N=768)**
+The target kernel regex is: **{KERNEL_TO_TUNE} (E=128, N=768)**
 The full (unpruned) parameter space is:
 {json.dumps(FULL_PARAM_SPACE, indent=2)}
 
@@ -152,13 +145,22 @@ Generate the JSON plan:
 
     print("[HAKT] Initializing HAKT Reward Function...")
     
-    reward_fn = HAKT_Reward_Function(
+    # --- FIX #2: Create the class *object* first ---
+    reward_fn_object = HAKT_Reward_Function(
         user_goal=USER_GOAL,
         model_name=MODEL_NAME,
         fast_loop_steps=FAST_LOOP_STEPS,
         worker_gpu_id=WORKER_GPU_ID, # Pass the PHYSICAL ID (7)
         static_args=STATIC_ARGS_FOR_HAKT
     )
+
+    # --- FIX #2 (Continued): Create a wrapper function ---
+    # This wrapper "tricks" the GRPOTrainer into seeing a function
+    # that it can get the `__name__` from, but it calls our object.
+    def hakt_reward_function_wrapper(completions, **kwargs):
+        # This is the "glue"
+        return reward_fn_object(completions, **kwargs)
+    # --- End Fix ---
 
     grpo_config = GRPOConfig(
         output_dir="hakt_professor_finetune",
@@ -184,7 +186,9 @@ Generate the JSON plan:
         tokenizer=tokenizer,
         args=grpo_config,
         train_dataset=dataset,
-        reward_funcs=[reward_fn], 
+        # --- FIX #2 (Continued): Pass the *wrapper function* ---
+        reward_funcs=[hakt_reward_function_wrapper], 
+        # --- End Fix ---
         processing_class=tokenizer, 
     )
 
@@ -200,5 +204,4 @@ Generate the JSON plan:
     print("[HAKT] System shutdown complete.")
 
 if __name__ == "__main__":
-
     main()
