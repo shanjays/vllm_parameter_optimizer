@@ -124,6 +124,11 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # --- THIS IS THE FIX: Attach the tokenizer to the model ---
+    # The GRPOTrainer will now find it automatically at 'model.tokenizer'
+    professor_llm.tokenizer = tokenizer
+    # --- END FIX ---
+
     print("[HAKT] Adding LoRA adapters to Professor LLM...")
     
     professor_llm = prepare_model_for_kbit_training(professor_llm)
@@ -176,11 +181,9 @@ Generate the JSON plan:
     def hakt_reward_function_wrapper(completions, **kwargs):
         return reward_fn_object(completions, **kwargs)
 
-    # We merge all TrainingArguments *into* the GRPOConfig
     grpo_config = GRPOConfig(
-        # TrainingArguments
         output_dir="hakt_professor_finetune",
-        per_device_train_batch_size=4, # Must be >= num_generations
+        per_device_train_batch_size=4, 
         gradient_accumulation_steps=1,
         learning_rate=2e-5, 
         num_train_epochs=1, 
@@ -190,7 +193,6 @@ Generate the JSON plan:
         report_to="tensorboard", 
         remove_unused_columns=False, 
 
-        # GRPOConfig
         temperature=0.7, 
         max_prompt_length=1024,
         max_completion_length=1024,
@@ -198,23 +200,24 @@ Generate the JSON plan:
         loss_type="grpo", 
     )
 
-    # --- THIS IS THE FIX ---
-    # The native GRPOTrainer constructor does NOT take tokenizer or peft_config.
-    # The tokenizer is passed to the trainer.train() call implicitly
-    # by the underlying transformers.Trainer.
+    # --- THIS IS THE FIX (Part 2) ---
+    # We remove 'tokenizer' and 'peft_config' from the constructor,
+    # because the trainer will get them from the 'model' object.
     trainer = GRPOTrainer(
         model=professor_llm,
         args=grpo_config, 
         train_dataset=dataset,
         reward_funcs=[hakt_reward_function_wrapper],
-        # tokenizer=tokenizer,  <-- REMOVED
-        # peft_config=peft_config, <-- REMOVED
     )
     # --- END FIX ---
 
     print("\n--- [HAKT] Starting 'Slow Loop' Training for Professor LLM ---")
-    # The tokenizer is passed here, to the underlying .train() method
-    trainer.train(tokenizer=tokenizer)
+    
+    # --- THIS IS THE FIX (Part 3) ---
+    # We remove 'tokenizer' from the train() call.
+    trainer.train()
+    # --- END FIX ---
+    
     print("\n--- [HAKT] Professor LLM fine-tuning complete ---")
 
     final_model_path = "hakt_professor_final"
