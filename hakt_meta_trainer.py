@@ -10,7 +10,8 @@ from datasets import Dataset
 # We no longer import BitsAndBytesConfig
 from transformers import TrainingArguments, AutoTokenizer, AutoModelForCausalLM
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from trl import GRPOConfig, GRPOTrainer
+# We must import the *native* GRPOTrainer and GRPOConfig
+from trl import GRPOTrainer, GRPOConfig
 # --- END FIX ---
 
 from professor_reward import HAKT_Reward_Function # The "Slow Loop" reward
@@ -116,14 +117,9 @@ def main():
 
     max_seq_length = 2048
     print(f"[HAKT] Loading Professor LLM '{PROFESSOR_MODEL}' onto GPU 0 (Logical)...")
-
-    # --- THIS IS THE FIX: Remove our custom BitsAndBytesConfig ---
-    # The BitsAndBytesConfig object has been deleted.
     
     professor_llm = AutoModelForCausalLM.from_pretrained(
         PROFESSOR_MODEL,
-        # We REMOVED the 'quantization_config=...' line
-        # We let transformers read the model's *native* Mxfp4Config
         device_map="auto", 
         trust_remote_code=True,
     )
@@ -131,11 +127,9 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(PROFESSOR_MODEL)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    # --- END FIX ---
 
     print("[HAKT] Adding LoRA adapters to Professor LLM...")
     
-    # We *still* need to prepare the k-bit model for training
     professor_llm = prepare_model_for_kbit_training(professor_llm)
     
     peft_config = LoraConfig(
@@ -186,7 +180,10 @@ Generate the JSON plan:
     def hakt_reward_function_wrapper(completions, **kwargs):
         return reward_fn_object(completions, **kwargs)
 
-    training_args = TrainingArguments(
+    # --- THIS IS THE FIX: The 'native' TRL GRPOTrainer API ---
+    # 1. We merge all TrainingArguments *into* the GRPOConfig
+    grpo_config = GRPOConfig(
+        # TrainingArguments
         output_dir="hakt_professor_finetune",
         per_device_train_batch_size=1, 
         gradient_accumulation_steps=1,
@@ -197,9 +194,8 @@ Generate the JSON plan:
         logging_steps=1,
         report_to="tensorboard", 
         remove_unused_columns=False, 
-    )
 
-    grpo_config = GRPOConfig(
+        # GRPOConfig
         temperature=0.7, 
         max_prompt_length=1024,
         max_completion_length=1024,
@@ -207,15 +203,17 @@ Generate the JSON plan:
         loss_type="grpo", 
     )
 
+    # 2. The native GRPOTrainer takes 'args=grpo_config'
+    #    and does *not* take 'tokenizer', 'peft_config', or **kwargs
     trainer = GRPOTrainer(
         model=professor_llm,
-        tokenizer=tokenizer,
-        args=training_args, 
+        args=grpo_config, 
         train_dataset=dataset,
-        reward_funcs=[hakt_reward_function_wrapper], 
-        peft_config=peft_config, 
-        **grpo_config.to_dict(), 
+        reward_funcs=[hakt_reward_function_wrapper],
+        # The tokenizer is passed *inside* the model object
+        # or it will be loaded from the model name
     )
+    # --- END FIX ---
 
     print("\n--- [HAKT] Starting 'Slow Loop' Training for Professor LLM ---")
     trainer.train()
