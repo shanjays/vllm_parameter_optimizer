@@ -7,8 +7,8 @@ import time
 from datasets import Dataset
 
 # --- THIS IS THE FIX ---
-# We are now using "native" transformers libraries, NOT Unsloth
-from transformers import TrainingArguments, AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+# We no longer import BitsAndBytesConfig
+from transformers import TrainingArguments, AutoTokenizer, AutoModelForCausalLM
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import GRPOConfig, GRPOTrainer
 # --- END FIX ---
@@ -19,9 +19,7 @@ from professor_reward import HAKT_Reward_Function # The "Slow Loop" reward
 AGENT_GPU_ID = 0  # Physical ID for Professor/Fighter
 WORKER_GPU_ID = 7 # Physical ID for BenchmarkWorker
 
-# --- YOUR REQUESTED MODEL ---
 PROFESSOR_MODEL = "openai/gpt-oss-20b" 
-# --- END ---
 
 USER_GOAL = "throughput" 
 MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507" 
@@ -119,18 +117,14 @@ def main():
     max_seq_length = 2048
     print(f"[HAKT] Loading Professor LLM '{PROFESSOR_MODEL}' onto GPU 0 (Logical)...")
 
-    # --- THIS IS THE FIX: Native Hugging Face 4-bit loading ---
-    quantization_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_compute_dtype=torch.bfloat16
-    )
+    # --- THIS IS THE FIX: Remove our custom BitsAndBytesConfig ---
+    # The BitsAndBytesConfig object has been deleted.
     
     professor_llm = AutoModelForCausalLM.from_pretrained(
         PROFESSOR_MODEL,
-        quantization_config=quantization_config,
-        device_map="auto", # This will place it on logical GPU 0
+        # We REMOVED the 'quantization_config=...' line
+        # We let transformers read the model's *native* Mxfp4Config
+        device_map="auto", 
         trust_remote_code=True,
     )
     
@@ -141,7 +135,7 @@ def main():
 
     print("[HAKT] Adding LoRA adapters to Professor LLM...")
     
-    # --- THIS IS THE FIX: Native PEFT LoRA adapter setup ---
+    # We *still* need to prepare the k-bit model for training
     professor_llm = prepare_model_for_kbit_training(professor_llm)
     
     peft_config = LoraConfig(
@@ -157,7 +151,6 @@ def main():
     )
     
     professor_llm = get_peft_model(professor_llm, peft_config)
-    # --- END FIX ---
 
     professor_prompt = f"""
 You are HAKT, a 'Kevin-style' CUDA tuning expert.
@@ -190,11 +183,9 @@ Generate the JSON plan:
         static_args=STATIC_ARGS_FOR_HAKT
     )
 
-    # This wrapper is still needed for the native TRL trainer
     def hakt_reward_function_wrapper(completions, **kwargs):
         return reward_fn_object(completions, **kwargs)
 
-    # Note: We are now using the native TRL TrainingArguments, not Unsloth's
     training_args = TrainingArguments(
         output_dir="hakt_professor_finetune",
         per_device_train_batch_size=1, 
@@ -205,7 +196,7 @@ Generate the JSON plan:
         save_steps=10, 
         logging_steps=1,
         report_to="tensorboard", 
-        remove_unused_columns=False, # Important for TRL
+        remove_unused_columns=False, 
     )
 
     grpo_config = GRPOConfig(
@@ -219,11 +210,11 @@ Generate the JSON plan:
     trainer = GRPOTrainer(
         model=professor_llm,
         tokenizer=tokenizer,
-        args=training_args, # Pass the native TrainingArguments
+        args=training_args, 
         train_dataset=dataset,
         reward_funcs=[hakt_reward_function_wrapper], 
-        peft_config=peft_config, # Pass the PEFT config
-        **grpo_config.to_dict(), # Unpack the GRPO config
+        peft_config=peft_config, 
+        **grpo_config.to_dict(), 
     )
 
     print("\n--- [HAKT] Starting 'Slow Loop' Training for Professor LLM ---")
@@ -231,7 +222,7 @@ Generate the JSON plan:
     print("\n--- [HAKT] Professor LLM fine-tuning complete ---")
 
     final_model_path = "hakt_professor_final"
-    trainer.model.save_pretrained(final_model_path) # Use standard peft save
+    trainer.model.save_pretrained(final_model_path) 
     tokenizer.save_pretrained(final_model_path)
     print(f"Final fine-tuned Professor LLM saved to: {final_model_path}")
     
