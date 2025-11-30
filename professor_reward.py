@@ -31,6 +31,16 @@ class HAKT_Reward_Function:
         
         self.initial_state = self._get_initial_state()
 
+    def _clean_non_json_types(self, data):
+        """Recursively converts non-JSON serializable types (like sets) to lists."""
+        if isinstance(data, dict):
+            return {k: self._clean_non_json_types(v) for k, v in data.items()}
+        if isinstance(data, list):
+            return [self._clean_non_json_types(item) for item in data]
+        if isinstance(data, set):
+            return list(self._clean_non_json_types(list(data))) # Convert set items recursively
+        return data
+
     def _get_initial_state(self):
         print("[RewardFn] Getting initial state from worker...")
         try:
@@ -57,9 +67,11 @@ class HAKT_Reward_Function:
             try:
                 plan = self._extract_json(plan_str)
                 
+                # --- CRITICAL FIX: Clean the parsed object before serialization ---
+                plan = self._clean_non_json_types(plan)
+                
                 plan_file_path = f"temp_mission_plan_{int(time.time())}.json"
                 with open(plan_file_path, "w") as f:
-                    # The JSON object is now guaranteed to be clean by _extract_json
                     json.dump(plan, f, indent=2)
                     
                 print(f"[RewardFn] Starting 'Fast Loop' PPO training...")
@@ -73,6 +85,7 @@ class HAKT_Reward_Function:
                 os.remove(plan_file_path) 
                 
             except Exception as e:
+                # This catches the error if _extract_json fails OR if json.dump fails
                 print(f"[RewardFn] ERROR: HAKT reward calculation failed. {e}")
                 rewards.append(0.0) # Penalize bad/unparseable plans
         
@@ -83,40 +96,42 @@ class HAKT_Reward_Function:
         Extracts the JSON plan from the LLM's completion using robust hybrid parsing.
         """
         
-        # 1. First, simplify the string by removing common markdown wrappers
-        # This handles both ```json...``` and just ```...```
-        json_search_str = llm_output_str.replace('```json', '').replace('```', '')
+        # 1. Use regex to find the most likely JSON or Python dictionary block {..}.
+        # This is the most reliable regex to capture the whole block, ignoring markdown ticks/text.
+        match = re.search(r"(\{.*?\})", llm_output_str, re.DOTALL) 
         
-        # 2. Extract the block between the first { and the last }
-        # This is now the primary, robust extraction method.
-        start_idx = json_search_str.find('{')
-        end_idx = json_search_str.rfind('}')
+        json_str = None
         
-        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-            json_str = json_search_str[start_idx : end_idx + 1]
+        if match:
+            json_str = match.group(0).strip() # Capture group 0 is the whole match
         else:
             json_str = None
             
         if json_str:
-            # 3. Robust Cleanup (Control characters break both json.loads and ast.literal_eval)
+            # 2. Robust Cleanup (Control characters break both json.loads and ast.literal_eval)
             control_char_re = re.compile(r'[\x00-\x1F\x7F-\x9F]', flags=re.UNICODE)
-            cleaned_str = control_char_re.sub('', json_str).strip()
+            # Remove markdown ticks that the regex may have included
+            cleaned_str = json_str.replace('```json', '').replace('```', '').strip()
+            # Remove control characters
+            cleaned_str = control_char_re.sub('', cleaned_str).strip()
             
             # --- HYBRID PARSING FIX ---
             
-            # Try 1: Strict JSON parsing (handles Test 1 and perfect LLM output)
+            # Try 1: Strict JSON parsing (best for clean output)
             try:
                 return json.loads(cleaned_str)
             except json.JSONDecodeError:
                 pass # Failed strict parsing, proceed to Try 2
 
-            # Try 2: Python dictionary parsing (handles Tests 2, 3, 5, 6: single quotes, comments, trailing stuff)
+            # Try 2: Python dictionary parsing (best for single quotes, comments, trailing stuff)
             try:
-                # ast.literal_eval can handle single quotes and python comments
+                # --- DEBUGGING OUTPUT FOR SYNTAX ERROR ---
+                print(f"DEBUG: Falling back to AST on string: {cleaned_str}")
+                # --- END DEBUGGING ---
                 return ast.literal_eval(cleaned_str)
             except (SyntaxError, ValueError, json.JSONDecodeError) as e:
-                # Catch any failure from parsing
-                print(f"ERROR parsing LLM JSON: {e}")
+                # This catches the ':' expected error.
+                print(f"ERROR parsing LLM JSON: {e} --- Failing String: {cleaned_str[:120]}...")
                 raise e # Raise the last error encountered
 
         # If no JSON was found after all attempts
