@@ -5,7 +5,7 @@ import time
 import torch
 import os
 import re 
-import ast # <-- NEW: Python Abstract Syntax Tree
+import ast # Python Abstract Syntax Tree
 from fast_gym_env import FastGymEnv
 from fighter_agent import FighterPilot
 from benchmark_worker import BenchmarkWorker
@@ -80,11 +80,10 @@ class HAKT_Reward_Function:
 
     def _extract_json(self, llm_output_str):
         """
-        Extracts the JSON plan from the LLM's completion using robust regex and ast.literal_eval.
+        Extracts the JSON plan from the LLM's completion using robust hybrid parsing.
         """
         
-        # 1. Regex to find the JSON block, optionally enclosed in markdown ticks (```json or ```)
-        # We also look for the plain dictionary format.
+        # 1. Regex to find the JSON block, handling markdown ticks or raw braces
         match = re.search(r"```json\s*(.*?)\s*```|(\s*\{.*\}\s*)", llm_output_str, re.DOTALL)
         
         json_str = None
@@ -99,22 +98,26 @@ class HAKT_Reward_Function:
                 json_str = llm_output_str[start_idx : end_idx + 1]
             
         if json_str:
-            # 2. Robust Cleanup
-            # Remove invalid control characters (ASCII characters < 32, except tabs/newlines)
+            # 2. Robust Cleanup (Control characters break both json.loads and ast.literal_eval)
             control_char_re = re.compile(r'[\x00-\x1F\x7F-\x9F]', flags=re.UNICODE)
             cleaned_str = control_char_re.sub('', json_str).strip()
             
-            # 3. Use ast.literal_eval to safely parse Python dicts (allows single quotes, etc.)
+            # --- HYBRID PARSING FIX ---
+            
+            # Try 1: Strict JSON parsing (handles Test 1 and perfect LLM output)
             try:
-                # ast.literal_eval returns a Python dict
-                python_dict = ast.literal_eval(cleaned_str)
-                # We return the dict, which json.dump() can safely convert to strict JSON later
-                return python_dict
-                
+                return json.loads(cleaned_str)
+            except json.JSONDecodeError:
+                pass # Failed strict parsing, proceed to Try 2
+
+            # Try 2: Python dictionary parsing (handles Tests 2, 3, 5, 6: single quotes, comments, trailing stuff)
+            try:
+                # ast.literal_eval can handle single quotes and python comments
+                return ast.literal_eval(cleaned_str)
             except (SyntaxError, ValueError, json.JSONDecodeError) as e:
                 # Catch any failure from parsing
                 print(f"ERROR parsing LLM JSON: {e}")
-                raise e
+                raise e # Raise the last error encountered
 
         # If no JSON was found after all attempts
         raise ValueError("No valid JSON structure found in LLM output.")
