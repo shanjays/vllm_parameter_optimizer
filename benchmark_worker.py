@@ -25,9 +25,14 @@ class BenchmarkWorker:
         try:
             import vllm
             vllm_lib_path = os.path.dirname(vllm.__file__)
+            # Note: vllm 0.10.2 might have a different config path
+            # We'll try the old one, but add a fallback.
             self.vllm_config_dir = os.path.join(
                 vllm_lib_path, "model_executor/layers/fused_moe/configs/"
             )
+            if not os.path.exists(self.vllm_config_dir):
+                 self.vllm_config_dir = "/tmp/vllm_configs/"
+                 
             os.makedirs(self.vllm_config_dir, exist_ok=True)
             print(f"[BenchmarkWorker] vLLM config path set to: {self.vllm_config_dir}")
             del vllm 
@@ -37,8 +42,6 @@ class BenchmarkWorker:
             os.makedirs(self.vllm_config_dir, exist_ok=True)
             
         print(f"[BenchmarkWorker] Initialized on PHYSICAL GPU {self.gpu_id} (PID: {pid})")
-        # Note: The actor process itself runs on a *logical* GPU assigned by Ray.
-        # The `self.gpu_id` (e.g., 7) is used to pin *subprocesses*.
 
     def get_gpu_id(self):
         return self.gpu_id
@@ -55,9 +58,7 @@ class BenchmarkWorker:
 
         ncu_command = [
             "ncu", "--csv",
-            # --- FIX #1: Use regex to find the kernel ---
-            "--kernel-name-regex", static_args['kernel_name'],
-            # --- End Fix ---
+            "--kernel-name", static_args['kernel_name'], 
             "--metrics", "sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed,lts__t_sector_hit_rate.pct,l1tex__t_sector_hit_rate.pct",
             "--target-processes", "all",
             "--force-overwrite",
@@ -73,12 +74,14 @@ class BenchmarkWorker:
             "--inter-size", str(static_args['inter_size']),
             "--num-tokens", str(static_args['num_tokens']),
             "--dtype", static_args['dtype'],
-            "--num-iters", str(static_args['num_iters'])
+            "--num-iters", str(static_args['num_iters']),
+            # --- THIS IS THE FIX ---
+            "--num-warmup-iters", "1", # This argument was missing
+            # --- END FIX ---
         ]
         
         full_command = ncu_command + python_command
         env = os.environ.copy()
-        # This is critical: pin the *subprocess* to the physical worker GPU
         env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id) 
 
         try:
@@ -90,7 +93,6 @@ class BenchmarkWorker:
             print(f"[BenchmarkWorker] ERROR: NCU run timed out on GPU {self.gpu_id}.")
             return None, -100.0, None
 
-        # 5. Parse the ncu_log.csv
         try:
             with open(self.ncu_log_path, 'r') as f:
                 csv_data = f.read()
@@ -99,7 +101,6 @@ class BenchmarkWorker:
                 metrics = {'sm': [], 'dram': [], 'l1': [], 'l2': []}
                 row_count = 0
                 for row in csv_reader:
-                    # This try-except block handles malformed rows
                     try:
                         metrics['sm'].append(float(row['sm__throughput.avg.pct_of_peak_sustained_elapsed']))
                         metrics['dram'].append(float(row['dram__throughput.avg.pct_of_peak_sustained_elapsed']))
@@ -107,16 +108,12 @@ class BenchmarkWorker:
                         metrics['l2'].append(float(row['lts__t_sector_hit_rate.pct']))
                         row_count += 1
                     except (KeyError, ValueError, TypeError):
-                        # This row is malformed, skip it
                         print(f"[BenchmarkWorker] WARNING: Skipping malformed NCU row: {row}")
                         continue
                 
-                # --- FIX #2: Add check for empty (but valid) CSV ---
-                # This happens if ncu runs but finds no kernels matching the regex
                 if row_count == 0:
-                    raise Exception(f"NCU ran but found 0 valid kernels matching regex '{static_args['kernel_name']}'.")
-                # --- End Fix ---
-
+                    raise Exception(f"NCU ran but found 0 valid kernels matching '{static_args['kernel_name']}'. Check ptrace_scope.")
+                
                 state = np.array([
                     np.mean(metrics['sm']),
                     np.mean(metrics['dram']),
@@ -155,8 +152,10 @@ class BenchmarkWorker:
             print(f"[BenchmarkWorker] ERROR: vLLM import failed in worker. {e}")
             return 0.0
 
-        E = STATIC_ARGS_FOR_HAKT['num_experts']    
-        N = STATIC_ARGS_FOR_HAKT['inter_size'] // 2 
+        # We must use the static_args from the main script, not define them here
+        static_args = STATIC_ARGS_FOR_HAKT 
+        E = static_args['num_experts']    
+        N = static_args['inter_size'] // 2 
         
         config_filename = f"E={E},N={N},device_name=NVIDIA_H100_80GB_HBM3.json" 
         config_path = os.path.join(self.vllm_config_dir, config_filename)
@@ -175,7 +174,6 @@ class BenchmarkWorker:
             return 0.0
             
         env = os.environ.copy()
-        # This is critical: pin the *subprocess* to the physical worker GPU
         env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
 
         command = [
