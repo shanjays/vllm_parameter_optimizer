@@ -10,6 +10,23 @@ from fast_gym_env import FastGymEnv
 from fighter_agent import FighterPilot
 from benchmark_worker import BenchmarkWorker
 
+# Valid num_warps values (powers of 2 supported by Triton)
+VALID_NUM_WARPS = [1, 2, 4, 8, 16, 32]
+
+
+def sanitize_mission_plan(plan):
+    """Ensures all num_warps values are valid powers of 2."""
+    if 'pruned_action_space' in plan and 'num_warps' in plan['pruned_action_space']:
+        original = plan['pruned_action_space']['num_warps']
+        sanitized = [w for w in original if w in VALID_NUM_WARPS]
+        if not sanitized:
+            sanitized = [4]  # Default fallback
+            print(f"[RewardFn] WARNING: No valid num_warps in {original}, using [4]")
+        elif len(sanitized) != len(original):
+            print(f"[RewardFn] WARNING: Filtered invalid num_warps: {original} -> {sanitized}")
+        plan['pruned_action_space']['num_warps'] = sanitized
+    return plan
+
 # --- REVISION ---
 # The "rogue" ray.init() block that was here has been REMOVED.
 # hakt_meta_trainer.py is now the only script that calls ray.init().
@@ -75,6 +92,9 @@ class HAKT_Reward_Function:
                 
                 # --- CRITICAL FIX: Clean the parsed object before serialization ---
                 plan = self._clean_non_json_types(plan)
+                
+                # --- Validate num_warps to ensure values are powers of 2 ---
+                plan = sanitize_mission_plan(plan)
                 
                 plan_file_path = f"temp_mission_plan_{int(time.time())}_{i}.json"
                 with open(plan_file_path, "w") as f:
