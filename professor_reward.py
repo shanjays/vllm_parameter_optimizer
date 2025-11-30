@@ -195,10 +195,17 @@ class HAKT_Reward_Function:
         json_str = re.sub(r',\s*([\]}])', r'\1', json_str)
 
         # Clean number values with trailing periods or malformed scientific notation
-        # Pattern matches numbers like "42.75." or "1.5e" in JSON context
+        # Pattern explanation:
+        #   [0-9]+       - one or more digits (integer part)
+        #   \.?          - optional decimal point
+        #   [0-9]*       - zero or more digits (fractional part)
+        #   [eE]?        - optional exponent indicator
+        #   [+-]?        - optional sign for exponent
+        #   [0-9]*       - exponent digits
+        #   \.+          - one or more trailing periods (the malformed part we're fixing)
+        #   (?=\s*[,\]\}]) - lookahead for JSON delimiter (comma, bracket, or brace)
         def clean_json_numbers(match):
             return self._clean_number_string(match.group(0))
-        # Fix numbers followed by trailing periods before comma/bracket/brace
         json_str = re.sub(r'[0-9]+\.?[0-9]*[eE]?[+-]?[0-9]*\.+(?=\s*[,\]\}])', clean_json_numbers, json_str)
 
         # Force closure if braces unbalanced

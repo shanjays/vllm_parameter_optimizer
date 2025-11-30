@@ -13,6 +13,21 @@ def _clean_number_string(s: str) -> str:
     """
     Clean a number string by removing trailing periods, handling scientific notation,
     and other common LLM formatting issues.
+    
+    Args:
+        s: Input string that may contain a malformed number
+        
+    Returns:
+        str: Cleaned number string. Returns '0.0' for completely invalid inputs.
+        
+    Examples:
+        '42.75.' -> '42.75'   (trailing period removed)
+        '1.5e'   -> '1.5'     (incomplete exponent removed)
+        'e'      -> '0.0'     (invalid, returns default)
+        'e+'     -> '0.0'     (invalid, returns default)
+        ''       -> '0.0'     (empty string, returns default)
+        '3.14'   -> '3.14'    (valid, unchanged)
+        '1e10'   -> '1e10'    (valid scientific notation, unchanged)
     """
     s = s.strip()
     # Remove trailing periods (e.g., "42.75." -> "42.75")

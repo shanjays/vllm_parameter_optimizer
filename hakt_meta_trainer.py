@@ -110,8 +110,9 @@ def main():
     # --- THIS IS THE UNSLOTH FIX ---
     # We replace the standard loader with FastLanguageModel
     # This will load the model in 4-bit and fix the OOM error.
-    # Increased max_seq_length from 2048 to 8192 for better VRAM utilization on H100
-    max_seq_length = 8192
+    # Increased max_seq_length from 2048 to 4096 for better VRAM utilization on H100
+    # Note: Using 4096 instead of 8192 to balance memory usage with batch size increase
+    max_seq_length = 4096
     professor_llm, tokenizer = FastLanguageModel.from_pretrained(
         model_name = PROFESSOR_MODEL,
         max_seq_length = max_seq_length,
