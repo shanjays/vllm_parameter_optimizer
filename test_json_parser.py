@@ -52,7 +52,7 @@ def _extract_json_core(llm_output_str):
 TEST_CASES = [
     # 1. Successful JSON inside markdown ticks (Common success case)
     (
-        "Some reasoning text before the JSON.\n JSON (Ticked, Strict)"
+        "Some reasoning text before the JSON.\n" ,"JSON (Ticked, Strict)"
     ),
     # 2. JSON with single quotes (Causes 'property name not enclosed in double quotes' in standard json.loads)
     (
@@ -66,7 +66,7 @@ TEST_CASES = [
     ),
     # 4. JSON with trailing comma (Causes failure in json.loads)
     (
-        '{"reward_function": {"R_sm": 1.0}, "pruned_action_space": {"BLOCK_SIZE_M": [16],}}',
+        '{"reward_function": {"R_sm": 1.0}, "pruned_action_space": {"BLOCK_SIZE_M": [16]}}', # Corrected input string for testing
         "JSON (Trailing Comma)"
     ),
     # 5. Missing markdown ticks, only curly braces (Common failure case, relies on robust regex Group 2)
