@@ -95,59 +95,77 @@ class BenchmarkWorker:
             print(f"[BenchmarkWorker] ERROR: NCU run timed out on GPU {self.gpu_id}.")
             return None, -100.0, None
 
-        # --- FIX for Robust "Long Format" CSV Parsing ---
+        # --- THIS IS THE FIX: Robust "Long Format" CSV Parsing ---
         try:
             csv_data = ""
+            # We will group metrics by Kernel Name and Invocation ID
+            # Ex: { "fused_moe_kernel_1": {'sm': 10.0, 'dram': 20.0, ...} }
             kernel_invocations = {}
+            
+            clean_csv_lines = []
+            header_found = False
 
             with open(self.ncu_log_path, 'r') as f:
-                header_line = None
-                file_lines = []
                 for line in f:
-                    csv_data += line 
-                    file_lines.append(line)
-                    if line.strip().startswith('"ID"'):
-                        header_line = line
-                        file_lines.extend(f.readlines())
-                        break
+                    csv_data += line # Store all data for the reward fn
+                    
+                    # 1. Find the real header row, skipping garbage lines
+                    if not header_found and line.strip().startswith('"ID"'):
+                        header_found = True
+                    
+                    # 2. Once header is found, append all subsequent lines
+                    if header_found:
+                        clean_csv_lines.append(line)
                 
-                if header_line is None:
-                    raise Exception("NCU ran but did not produce a valid CSV header (no 'ID' row found).")
+            if not header_found:
+                raise Exception("NCU ran but did not produce a valid CSV header (no 'ID' row found).")
 
-                csv_reader = csv.DictReader([header_line] + file_lines)
-                
-                for row in csv_reader:
-                    try:
-                        invocation_key = f"{row['Kernel Name']}_{row['ID']}"
-                        
-                        if invocation_key not in kernel_invocations:
-                            kernel_invocations[invocation_key] = {}
-                        
-                        metric_name = row['Metric Name']
-                        metric_value_str = row['Metric Value'].replace('%', '').strip()
-                        metric_value = float(metric_value_str)
-                        
-                        if metric_name == 'sm__throughput.avg.pct_of_peak_sustained_elapsed':
-                            kernel_invocations[invocation_key]['sm'] = metric_value
-                        elif metric_name == 'dram__throughput.avg.pct_of_peak_sustained_elapsed':
-                            kernel_invocations[invocation_key]['dram'] = metric_value
-                        elif metric_name == 'l1tex__t_sector_hit_rate.pct':
-                            kernel_invocations[invocation_key]['l1'] = metric_value
-                        elif metric_name == 'lts__t_sector_hit_rate.pct':
-                            kernel_invocations[invocation_key]['l2'] = metric_value
-                            
-                    except (KeyError, ValueError, TypeError) as e:
-                        continue
+            # 3. Process the *clean* CSV data
+            csv_reader = csv.DictReader(clean_csv_lines)
             
+            for row in csv_reader:
+                try:
+                    # Create a unique ID for each kernel invocation
+                    invocation_key = f"{row['Kernel Name']}_{row['ID']}"
+                    
+                    if invocation_key not in kernel_invocations:
+                        kernel_invocations[invocation_key] = {}
+                    
+                    # Store the metric value
+                    metric_name = row['Metric Name']
+                    # This is where the 'NoneType' error happened.
+                    # We add a check for None before calling .replace()
+                    metric_value_str = row.get('Metric Value')
+                    if metric_value_str is None:
+                        continue # Skip this malformed row
+                        
+                    metric_value = float(metric_value_str.replace('%', '').strip())
+                    
+                    if metric_name == 'sm__throughput.avg.pct_of_peak_sustained_elapsed':
+                        kernel_invocations[invocation_key]['sm'] = metric_value
+                    elif metric_name == 'dram__throughput.avg.pct_of_peak_sustained_elapsed':
+                        kernel_invocations[invocation_key]['dram'] = metric_value
+                    elif metric_name == 'l1tex__t_sector_hit_rate.pct':
+                        kernel_invocations[invocation_key]['l1'] = metric_value
+                    elif metric_name == 'lts__t_sector_hit_rate.pct':
+                        kernel_invocations[invocation_key]['l2'] = metric_value
+                        
+                except (KeyError, ValueError, TypeError) as e:
+                    # This warning is normal for garbage lines that slip through
+                    # print(f"[BenchmarkWorker] WARNING: Skipping malformed/unexpected NCU row. Error: {e}. Row: {row}")
+                    continue
+            
+            # 4. Now, aggregate the metrics from all valid invocations
             metrics = {'sm': [], 'dram': [], 'l1': [], 'l2': []}
             for invocation in kernel_invocations.values():
+                # Only count *complete* data points
                 if all(k in invocation for k in ['sm', 'dram', 'l1', 'l2']):
                     metrics['sm'].append(invocation['sm'])
                     metrics['dram'].append(invocation['dram'])
                     metrics['l1'].append(invocation['l1'])
                     metrics['l2'].append(invocation['l2'])
             
-            if not metrics['sm']: 
+            if not metrics['sm']: # Check if we found any valid, complete invocations
                 raise Exception(f"NCU ran but found 0 *complete* kernel metric sets matching '{static_args['kernel_name']}'.")
             
             # --- END FIX ---
@@ -190,6 +208,8 @@ class BenchmarkWorker:
             print(f"[BenchmarkWorker] ERROR: vLLM import failed in worker. {e}")
             return 0.0
 
+        # This is a bit of a hack. We should pass static_args to the worker.
+        # For now, we'll hardcode the values we know.
         static_args = {
             "num_experts": 128,
             "inter_size": 1536,
