@@ -214,14 +214,15 @@ class BenchmarkWorker:
             print(f"[BenchmarkWorker] ERROR: vLLM import failed in worker. {e}")
             return 0.0
 
-        # This is a bit of a hack. We should pass static_args to the worker.
-        # For now, we'll hardcode the values we know.
+        # Qwen 30B MoE configuration for vLLM config filename
+        # E = number of experts (128 for Qwen 30B)
+        # N = intermediate size for MoE FFN (inter_size value from model config)
         static_args = {
-            "num_experts": 128,
-            "inter_size": 1536,
+            "num_experts": 128,  # Qwen 30B has 128 experts
+            "inter_size": 1536,  # Intermediate size from model config
         }
         E = static_args['num_experts']    
-        N = static_args['inter_size'] // 2 
+        N = static_args['inter_size']  # Use full inter_size, not halved
         
         config_filename = f"E={E},N={N},device_name=NVIDIA_H100_80GB_HBM3.json" 
         config_path = os.path.join(self.vllm_config_dir, config_filename)

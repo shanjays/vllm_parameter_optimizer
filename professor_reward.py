@@ -141,21 +141,45 @@ class HAKT_Reward_Function:
                 s = s[:last_brace+1]
         return s
 
+    def _clean_number_string(self, s: str) -> str:
+        """
+        Clean a number string by removing trailing periods, handling scientific notation,
+        and other common LLM formatting issues.
+        """
+        s = s.strip()
+        # Remove trailing periods (e.g., "42.75." -> "42.75")
+        s = re.sub(r'\.+$', '', s)
+        # Remove leading/trailing whitespace again after cleanup
+        s = s.strip()
+        # Handle case where LLM outputs just 'e' or partial scientific notation
+        if s.lower() in ('e', 'e+', 'e-', '+e', '-e', ''):
+            return '0.0'
+        # Fix malformed scientific notation like "1.5e" -> "1.5"
+        s = re.sub(r'[eE][+-]?$', '', s)
+        return s
+
     def _extract_json(self, llm_output_str):
         llm_output_str = self._normalize_unicode(llm_output_str)
 
         # Pre-clean reward arrays w/ annotation before locating braces
         llm_output_str = self._preclean_reward_arrays(llm_output_str)
 
-        match = re.search(r'(\{.*\})', llm_output_str, re.DOTALL)
-        if not match:
-            salvage = self._try_salvage_plan(llm_output_str)
-            if salvage is not None:
-                return salvage
-            print("[RewardFn] No braces found; using default-safe plan for this completion.")
-            return self._default_safe_plan()
+        # Try to extract content from <param></param> XML tags first (preferred format)
+        param_match = re.search(r'<param>\s*(.*?)\s*</param>', llm_output_str, re.DOTALL | re.IGNORECASE)
+        if param_match:
+            json_str = param_match.group(1).strip()
+            print("[RewardFn] Found content within <param> tags.")
+        else:
+            # Fallback to brace matching
+            match = re.search(r'(\{.*\})', llm_output_str, re.DOTALL)
+            if not match:
+                salvage = self._try_salvage_plan(llm_output_str)
+                if salvage is not None:
+                    return salvage
+                print("[RewardFn] No braces found; using default-safe plan for this completion.")
+                return self._default_safe_plan()
+            json_str = match.group(0).strip()
 
-        json_str = match.group(0).strip()
         json_str = json_str.replace('```json', '').replace('```', '').strip()
 
         # Replace any leftover schema-like arrays (second pass)
@@ -169,6 +193,20 @@ class HAKT_Reward_Function:
 
         # Remove trailing commas before } or ]
         json_str = re.sub(r',\s*([\]}])', r'\1', json_str)
+
+        # Clean number values with trailing periods or malformed scientific notation
+        # Pattern explanation:
+        #   [0-9]+       - one or more digits (integer part)
+        #   \.?          - optional decimal point
+        #   [0-9]*       - zero or more digits (fractional part)
+        #   [eE]?        - optional exponent indicator
+        #   [+-]?        - optional sign for exponent
+        #   [0-9]*       - exponent digits
+        #   \.+          - one or more trailing periods (the malformed part we're fixing)
+        #   (?=\s*[,\]\}]) - lookahead for JSON delimiter (comma, bracket, or brace)
+        def clean_json_numbers(match):
+            return self._clean_number_string(match.group(0))
+        json_str = re.sub(r'[0-9]+\.?[0-9]*[eE]?[+-]?[0-9]*\.+(?=\s*[,\]\}])', clean_json_numbers, json_str)
 
         # Force closure if braces unbalanced
         open_braces = json_str.count('{')

@@ -110,7 +110,9 @@ def main():
     # --- THIS IS THE UNSLOTH FIX ---
     # We replace the standard loader with FastLanguageModel
     # This will load the model in 4-bit and fix the OOM error.
-    max_seq_length = 2048 # You can increase this if needed
+    # Increased max_seq_length from 2048 to 4096 for better VRAM utilization on H100
+    # Note: Using 4096 instead of 8192 to balance memory usage with batch size increase
+    max_seq_length = 4096
     professor_llm, tokenizer = FastLanguageModel.from_pretrained(
         model_name = PROFESSOR_MODEL,
         max_seq_length = max_seq_length,
@@ -139,40 +141,101 @@ def main():
     )
     # --- END FIX ---
 
-    professor_prompt = f"""
-You are a world-class CUDA kernel tuning expert. Respond with EXACTLY one JSON object (no surrounding text, no markdown).
-All values must be concrete JSON numbers or lists of integers. No comments, no type names, no trailing commas.
+    professor_prompt = f"""You are a world-class CUDA kernel tuning expert specializing in NVIDIA H100 GPU optimization.
 
-USER GOAL: {USER_GOAL}
-HARDWARE: NVIDIA H100
-MODEL NAME: {MODEL_NAME}
-TARGET KERNEL: {KERNEL_TO_TUNE}
-PARAMETER SPACE: {json.dumps(FULL_PARAM_SPACE)}
+=== HARDWARE SPECIFICATIONS (NVIDIA H100 80GB HBM3) ===
+- Memory: 80GB HBM3
+- Memory Bandwidth: 3.35 TB/s
+- FP16 Tensor Core Performance: 989 TFLOPS
+- FP32 Performance: 528 TFLOPS
+- Streaming Multiprocessors (SMs): 132 SMs with 128 CUDA cores each
+- L2 Cache: 50MB total, ~256KB per SM partition
+- Shared Memory: 228KB per SM (configurable L1/shared split)
+- Max Warps per SM: 64
+- Max Threads per SM: 2048
 
-PERFORMANCE REPORT (CSV):
+=== TARGET KERNEL: {KERNEL_TO_TUNE} ===
+The fused_moe_kernel is a Triton kernel for Mixture-of-Experts (MoE) computation.
+It fuses expert routing, token dispatch, and expert computation into a single kernel.
+
+=== KERNEL PARAMETER IMPACT ===
+| Parameter | Description | Increasing Value Effect |
+|-----------|-------------|------------------------|
+| BLOCK_SIZE_M | Tokens processed per thread block | More tokens per block = higher throughput, but may reduce occupancy if shared memory exceeds limits |
+| BLOCK_SIZE_N | Output dimension tile size | Larger tiles = better memory coalescing, but more register pressure |
+| BLOCK_SIZE_K | Reduction dimension tile size | Larger K = more shared memory usage, better L1 cache utilization, fewer global memory accesses |
+| GROUP_SIZE_M | Number of blocks grouped for L2 locality | Higher = better L2 reuse for weights, but may increase latency |
+| num_warps | Warps per block (MUST be power of 2: 2,4,8,16,32) | More parallelism per block, but higher values may reduce occupancy |
+| num_stages | Software pipelining stages (1-8) | More prefetching = hides memory latency, but uses more registers and shared memory |
+
+=== TARGET MODEL: {MODEL_NAME} ===
+- Architecture: Mixture-of-Experts (MoE)
+- Number of Experts: {STATIC_ARGS_FOR_HAKT['num_experts']} experts
+- Top-K Routing: {STATIC_ARGS_FOR_HAKT['top_k']}
+- Hidden Size: {STATIC_ARGS_FOR_HAKT['hidden_size']}
+- Intermediate Size: {STATIC_ARGS_FOR_HAKT['inter_size']}
+- Data Type: {STATIC_ARGS_FOR_HAKT['dtype']}
+
+=== USER OPTIMIZATION GOAL ===
+{USER_GOAL}
+
+=== CURRENT PARAMETER SPACE ===
+{json.dumps(FULL_PARAM_SPACE, indent=2)}
+
+=== INITIAL PERFORMANCE REPORT (NCU CSV) ===
 {initial_ncu_report}
 
-Output JSON schema:
+=== OUTPUT FORMAT ===
+You MUST output your response within <param></param> XML tags containing ONLY a valid JSON object.
+The JSON must be parseable by Python's json.loads() with no comments, trailing commas, or type annotations.
+
+<param>
 {{
   "reward_function": {{
-    "R_sm_throughput": <number>,
-    "R_dram_throughput": <number>,
-    "R_l1_hit_rate": <number>,
-    "R_l2_hit_rate": <number>
+    "R_sm_throughput": <float 0.0-1.0>,
+    "R_dram_throughput": <float 0.0-1.0>,
+    "R_l1_hit_rate": <float 0.0-1.0>,
+    "R_l2_hit_rate": <float 0.0-1.0>
   }},
   "pruned_action_space": {{
     "BLOCK_SIZE_M": [<int>, <int>, <int>],
     "BLOCK_SIZE_N": [<int>, <int>, <int>],
     "BLOCK_SIZE_K": [<int>, <int>, <int>],
-    "num_warps": [<int>, <int>, <int>],   // MUST be chosen from [2,4,8,16,32]
-    "num_stages": [<int>, <int>, <int>]   // positive integers (1..8)
+    "num_warps": [<int>, <int>, <int>],
+    "num_stages": [<int>, <int>, <int>]
   }}
 }}
+</param>
 
-Rules:
-- Each list may contain 1 to 3 integers.
-- pruned_action_space.num_warps values MUST be from [2,4,8,16,32].
-- Output MUST be valid JSON parseable by json.loads().
+=== EXAMPLE VALID OUTPUT (from Mistral 7B E=8 config) ===
+<param>
+{{
+  "reward_function": {{
+    "R_sm_throughput": 0.6,
+    "R_dram_throughput": 0.2,
+    "R_l1_hit_rate": 0.1,
+    "R_l2_hit_rate": 0.1
+  }},
+  "pruned_action_space": {{
+    "BLOCK_SIZE_M": [16, 64, 128],
+    "BLOCK_SIZE_N": [32, 64, 128],
+    "BLOCK_SIZE_K": [64, 128, 256],
+    "num_warps": [4, 8, 16],
+    "num_stages": [3, 4, 5]
+  }}
+}}
+</param>
+
+=== RULES ===
+1. reward_function weights should sum to approximately 1.0
+2. Each pruned_action_space list may contain 1 to 3 integers from the PARAMETER SPACE
+3. num_warps values MUST be from [2, 4, 8, 16, 32] (powers of 2)
+4. num_stages values should be positive integers (1-8)
+5. Output ONLY the <param>...</param> block with valid JSON inside
+6. NO comments, NO trailing commas, NO type names like "float" or "int"
+7. All numbers must be concrete values (e.g., 0.5, 64, not "0.5" or "float")
+
+Analyze the NCU metrics and generate an optimized mission plan for the {KERNEL_TO_TUNE} targeting {MODEL_NAME} on H100:
 """
 
     dataset = Dataset.from_list([{"prompt": professor_prompt}] * LLM_TRAIN_STEPS)
@@ -189,9 +252,10 @@ Rules:
     def hakt_reward_function_wrapper(completions, **kwargs):
         return reward_fn_object(completions, **kwargs)
 
+    # Increased batch sizes and completion length for better H100 VRAM utilization (60-70GB target)
     grpo_config = GRPOConfig(
         output_dir="hakt_professor_finetune",
-        per_device_train_batch_size=4,
+        per_device_train_batch_size=8,  # Increased from 4 to 8 for better VRAM utilization
         gradient_accumulation_steps=1,
         learning_rate=2e-5,
         num_train_epochs=1,
@@ -201,8 +265,8 @@ Rules:
         report_to="tensorboard",
         remove_unused_columns=False,
         temperature=0.7,
-        max_prompt_length=1024,
-        max_completion_length=1024,
+        max_prompt_length=2048,  # Increased from 1024 to 2048 for longer prompts
+        max_completion_length=2048,  # Increased from 1024 to 2048 for longer outputs
         num_generations=4,
         loss_type="grpo",
     )

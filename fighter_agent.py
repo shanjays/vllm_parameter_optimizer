@@ -8,7 +8,7 @@ class FighterPilot:
     This class is a simple wrapper around the Stable-Baselines3 PPO agent.
     Its neural network (MlpPolicy) lives and trains on GPU 0.
     """
-    def __init__(self, env, log_dir="./hakt_logs/fighter_pilot/"):
+    def __init__(self, env, log_dir="./hakt_logs/fighter_pilot/", device=None):
         self.log_dir = log_dir
         self.model_path = os.path.join(self.log_dir, "hakt_ppo_model.zip")
         os.makedirs(self.log_dir, exist_ok=True)
@@ -16,8 +16,10 @@ class FighterPilot:
         # Wrap the 'Fast Gym' in a format SB3 understands
         self.env = DummyVecEnv([lambda: env])
         
-        # Ensure the agent trains on the correct device (GPU 0)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Ensure the agent trains on the correct device
+        # If device is explicitly passed, use that; otherwise auto-detect
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"[FighterPilot] Initializing PPO agent on device: {device}")
         
         self.model = PPO(
