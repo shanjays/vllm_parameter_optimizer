@@ -32,7 +32,7 @@ class HAKT_Reward_Function:
         self.initial_state = self._get_initial_state()
 
     def _clean_non_json_types(self, data):
-        """Recursively converts non-JSON serializable types (like sets) to lists."""
+        """Recursively converts non-JSON serializable types (like sets) to lists/strings."""
         if isinstance(data, dict):
             return {k: self._clean_non_json_types(v) for k, v in data.items()}
         if isinstance(data, list):
@@ -97,10 +97,9 @@ class HAKT_Reward_Function:
                 rewards.append(0.0) # Penalize bad/unparseable plans
                 
                 # If the plan was invalid, we must still run the PPO agent on a default plan
-                # to get the PPO agent trained on something (this is handled by the try/except in _run_fast_loop/set_mission_plan)
+                # to get the PPO agent trained on something.
                 if not is_valid_plan:
                     print("[RewardFn] Plan failed. Running Fast Loop on default, penalized plan to ensure training progression.")
-                    # Run the Fast Loop on a default plan (which rewards 0.0)
                     default_plan = {
                         'reward_function': {'R_sm_throughput': 0.01}, 
                         'pruned_action_space': {
@@ -115,7 +114,8 @@ class HAKT_Reward_Function:
                     try:
                         self._run_fast_loop(default_plan_path)
                     except Exception as fe:
-                        print(f"[RewardFn] WARNING: Default Fast Loop also failed. {fe}")
+                        # Log this for debugging but don't crash the main loop
+                        print(f"[RewardFn] WARNING: Default Fast Loop also failed. {fe}") 
                     finally:
                         os.remove(default_plan_path)
 
@@ -127,50 +127,51 @@ class HAKT_Reward_Function:
         Extracts the JSON plan from the LLM's completion using robust hybrid parsing.
         """
         
-        # 1. Use regex to find the most likely JSON or Python dictionary block {..}.
-        # This is the most stable regex to capture the whole block, ignoring markdown ticks/text.
-        # We use '.*' (greedy) inside the braces to capture the entire structure.
+        # --- FIX 1: Universal Character Scrubbing (Fixes 'invalid character ‑ (U+2011)') ---
+        # Replace common non-standard Unicode characters with their ASCII equivalents
+        # This fixes issues like non-breaking hyphens used by LLMs (U+2011)
+        llm_output_str = llm_output_str.replace('\u2011', '-') 
+        llm_output_str = llm_output_str.replace('\u202f', ' ') # Narrow non-breaking space
+        
+        # 1. Use greedy regex to find the entire content between the first { and the last }
+        # This handles the case where the LLM starts with reasoning text or ends abruptly.
         match = re.search(r"(\{.*\})", llm_output_str, re.DOTALL) 
         
         json_str = None
         
         if match:
-            json_str = match.group(0).strip() # Capture group 0 is the whole match
+            json_str = match.group(0).strip() 
         else:
-            json_str = None
+            raise ValueError("No valid JSON structure found in LLM output.")
             
-        if json_str:
-            # 2. Robust Cleanup (Control characters break both json.loads and ast.literal_eval)
-            control_char_re = re.compile(r'[\x00-\x1F\x7F-\x9F]', flags=re.UNICODE)
-            
-            # Remove markdown ticks that the regex may have included
-            cleaned_str = json_str.replace('```json', '').replace('```', '').strip()
-            
-            # Remove control characters
-            cleaned_str = control_char_re.sub('', cleaned_str).strip()
-            
-            # --- HYBRID PARSING FIX ---
-            
-            # Try 1: Strict JSON parsing (best for clean output)
-            try:
-                return json.loads(cleaned_str)
-            except json.JSONDecodeError:
-                pass # Failed strict parsing, proceed to Try 2
+        # 2. Robust Cleanup
+        control_char_re = re.compile(r'[\x00-\x1F\x7F-\x9F]', flags=re.UNICODE)
+        
+        # Remove markdown ticks that the regex may have included
+        cleaned_str = json_str.replace('```json', '').replace('```', '').strip()
+        
+        # Remove control characters
+        cleaned_str = control_char_re.sub('', cleaned_str).strip()
+        
+        # --- HYBRID PARSING FIX ---
+        
+        # Try 1: Strict JSON parsing (best for clean output)
+        try:
+            return json.loads(cleaned_str)
+        except json.JSONDecodeError:
+            pass # Failed strict parsing, proceed to Try 2
 
-            # Try 2: Python dictionary parsing (best for single quotes, comments, trailing stuff)
-            try:
-                # --- DEBUGGING OUTPUT FOR SYNTAX ERROR ---
-                print(f"DEBUG: Falling back to AST on string: {cleaned_str}")
-                # --- END DEBUGGING ---
-                return ast.literal_eval(cleaned_str)
-            except (SyntaxError, ValueError, json.JSONDecodeError) as e:
-                # This catches the ':' expected error.
-                # Log the error and the problematic string portion
-                print(f"ERROR parsing LLM JSON: {e} --- Failing String: {cleaned_str[:120]}...")
-                raise e # Raise the last error encountered
+        # Try 2: Python dictionary parsing (best for single quotes, comments, incomplete objects)
+        try:
+            # ast.literal_eval can handle single quotes and python comments
+            return ast.literal_eval(cleaned_str)
+        except (SyntaxError, ValueError, json.JSONDecodeError) as e:
+            # This catches the ':' expected error, unterminated string literal, etc.
+            print(f"ERROR parsing LLM JSON: {e} --- Failing String: {cleaned_str[:120]}...")
+            raise e # Raise the last error encountered
 
-        # If no JSON was found after all attempts
-        raise ValueError("No valid JSON structure found in LLM output.")
+        # Should be unreachable, but good practice
+        raise ValueError("Final parsing attempt failed.")
             
     def _run_fast_loop(self, mission_plan_path):
         """
@@ -186,7 +187,12 @@ class HAKT_Reward_Function:
         epoch_log_dir = f"./hakt_logs/run_{int(time.time())}/"
         pilot = FighterPilot(env, log_dir=epoch_log_dir)
         
-        print(f"[{pilot.__class__.__name__}] Training on {pilot.device} for {self.fast_loop_steps} steps...")
+        # --- FIX: Log the device attribute correctly, assuming PPO is functional ---
+        # The 'device' attribute is only available after initialization.
+        device_name = getattr(pilot, 'device', 'unknown device') 
+        print(f"[{pilot.__class__.__name__}] Training on {device_name} for {self.fast_loop_steps} steps...")
+        # --- END FIX ---
+        
         pilot.train_epoch(steps=self.fast_loop_steps)
         
         top_results = env.get_top_results(n=5)
