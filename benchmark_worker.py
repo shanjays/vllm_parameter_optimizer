@@ -34,7 +34,7 @@ class BenchmarkWorker:
         except Exception as e:
             print(f"[BenchmarkWorker] WARNING: Could not find vLLM path. {e}")
             # Fallback to user's hard-coded path from log
-            self.vllm_config_dir = "~/vllm/vllm/model_executor/layers/fused_moe/configs/"
+            self.vllm_config_dir = "~/vllmC/vllm/vllm/model_executor/layers/fused_moe/configs/"
             
         print(f"[BenchmarkWorker] Initialized on GPU {self.gpu_id} (PID: {pid})")
 
@@ -219,4 +219,5 @@ class BenchmarkWorker:
             # Add a latency parser if needed
             
         print(f"[BenchmarkWorker] ERROR: Could not parse vllm bench output.")
+
         return 0.0
