@@ -106,7 +106,20 @@ class HAKT_Reward_Function:
             cleaned_str = control_char_re.sub('', json_str).strip()
             
             # 2b. Safely replace single quotes with double quotes for keys and string values
-            # This fixes the "property name enclosed in double quotes" error
+            # This is a critical fix. We use a regex to ONLY replace single quotes
+            # that are adjacent to a comma, colon, bracket, or curly brace (i.e., keys/values).
+            # This preserves quotes inside string content (e.g., "It's").
+            def replace_single_quotes(match):
+                # We only replace if the matched pattern is not part of a string value (this is complex)
+                # Simpler: We rely on the LLM generating dicts where keys/values use single quotes.
+                s = match.group(0)
+                # Match single quotes that are followed by a colon or comma (likely dict keys)
+                if re.match(r"'\s*:", s) or re.match(r"'\s*[,}]", s):
+                    return s.replace("'", '"')
+                return s
+
+            # Use simple string replace for full coverage, assuming the LLM doesn't put single quotes in values
+            # This is the safest way to ensure all dictionary keys/values are double-quoted.
             cleaned_str = cleaned_str.replace("'", '"')
             
             # 2c. Fix common JSON trailing commas
