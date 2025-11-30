@@ -124,10 +124,7 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # --- THIS IS THE FIX: Attach the tokenizer to the model ---
-    # The GRPOTrainer will now find it automatically at 'model.tokenizer'
     professor_llm.tokenizer = tokenizer
-    # --- END FIX ---
 
     print("[HAKT] Adding LoRA adapters to Professor LLM...")
     
@@ -147,23 +144,40 @@ def main():
     
     professor_llm = get_peft_model(professor_llm, peft_config)
 
+    # --- FINAL PROMPT FIX: Remove ambiguity and force API-style JSON ---
     professor_prompt = f"""
-You are HAKT, a 'Kevin-style' CUDA tuning expert.
-The user's high-level goal is: **{USER_GOAL}**
-The hardware is: **NVIDIA H100**
-The target kernel is: **{KERNEL_TO_TUNE} (E=128, N=768)**
-The full (unpruned) parameter space is:
-{json.dumps(FULL_PARAM_SPACE, indent=2)}
+You are a world-class CUDA kernel tuning expert. Your sole function is to act as a JSON API endpoint.
+You must analyze the performance report provided below and generate a JSON object containing your optimization plan and rewards.
+Your response MUST contain ONLY the JSON object. Do not include any reasoning, markdown ticks (```json), or conversational text outside of the JSON structure.
 
-Here is the initial ncu report using the default config:
-```csv
+USER GOAL: {USER_GOAL} (Maximize this metric.)
+HARDWARE: NVIDIA H100
+MODEL NAME: = {MODEL_NAME}
+TARGET KERNEL: {KERNEL_TO_TUNE} (MoE Layer)
+PARAMETER SPACE: {json.dumps(FULL_PARAM_SPACE)}
+
+PERFORMANCE REPORT (CSV):
 {initial_ncu_report}
-```
-Analyze the bottlenecks...
-Generate the JSON plan:
-```json
+
+Generate the JSON plan based on this structure:
+{{
+    "reward_function": {{
+        "R_sm_throughput": [float, Weight for SM Utilization],
+        "R_dram_throughput": [float, Weight for DRAM Utilization],
+        "R_l1_hit_rate": [float, Weight for L1 Cache],
+        "R_l2_hit_rate": [float, Weight for L2 Cache]
+    }},
+    "pruned_action_space": {{
+        "BLOCK_SIZE_M": [list of int, Max 3 values],
+        "BLOCK_SIZE_N": [list of int, Max 3 values],
+        "BLOCK_SIZE_K": [list of int, Max 3 values],
+        "num_warps": [list of int, Max 3 values],
+        "num_stages": [list of int, Max 3 values]
+    }}
+}}
 """
-    
+    # --- END FINAL PROMPT FIX ---
+
     dataset = Dataset.from_list(
         [{"prompt": professor_prompt}] * LLM_TRAIN_STEPS
     )
@@ -200,24 +214,15 @@ Generate the JSON plan:
         loss_type="grpo", 
     )
 
-    # --- THIS IS THE FIX (Part 2) ---
-    # We remove 'tokenizer' and 'peft_config' from the constructor,
-    # because the trainer will get them from the 'model' object.
     trainer = GRPOTrainer(
         model=professor_llm,
         args=grpo_config, 
         train_dataset=dataset,
         reward_funcs=[hakt_reward_function_wrapper],
     )
-    # --- END FIX ---
 
     print("\n--- [HAKT] Starting 'Slow Loop' Training for Professor LLM ---")
-    
-    # --- THIS IS THE FIX (Part 3) ---
-    # We remove 'tokenizer' from the train() call.
     trainer.train()
-    # --- END FIX ---
-    
     print("\n--- [HAKT] Professor LLM fine-tuning complete ---")
 
     final_model_path = "hakt_professor_final"
