@@ -79,14 +79,11 @@ class HAKT_Reward_Function:
 
     def _extract_json(self, llm_output_str):
         """
-        Extracts the JSON plan from the LLM's completion using a robust regex.
-        This handles surrounding text, control characters, and markdown ticks.
+        Extracts the JSON plan from the LLM's completion using a robust regex and cleaning.
         """
-        # --- NEW ROBUST FIX ---
         
         # 1. Regex to find the JSON block, optionally enclosed in ```json or ```
         # It handles optional newlines/whitespace around the block
-        # The '(?s)' makes '.' match newlines, '.*?' is non-greedy
         match = re.search(r"```json\s*(.*?)\s*```|(\s*\{.*\}\s*)", llm_output_str, re.DOTALL)
         
         json_str = None
@@ -95,36 +92,41 @@ class HAKT_Reward_Function:
             json_str = match.group(1) or match.group(2)
             
         if json_str is None:
-            # Fallback to finding the first { and last } (original method, but less reliable)
+            # Fallback to finding the first { and last } 
             start_idx = llm_output_str.find('{')
             end_idx = llm_output_str.rfind('}')
             if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
                 json_str = llm_output_str[start_idx : end_idx + 1]
             
         if json_str:
-            # 2. Try to load the found string
+            # --- FINAL ROBUST CLEANUP ---
+            # 2a. Remove invalid control characters (ASCII characters < 32, except tabs/newlines)
+            # This fixes the "Invalid control character" error
+            control_char_re = re.compile(r'[\x00-\x1F\x7F-\x9F]', flags=re.UNICODE)
+            cleaned_str = control_char_re.sub('', json_str).strip()
+            
+            # 2b. Safely replace single quotes with double quotes for keys and string values
+            # This fixes the "property name enclosed in double quotes" error
+            cleaned_str = cleaned_str.replace("'", '"')
+            
+            # 2c. Fix common JSON trailing commas
+            cleaned_str = re.sub(r',\s*([\]\}])', r'\1', cleaned_str)
+            
+            # 3. Try to load the found string
             try:
-                # Remove common invalid control characters (like stray backslashes) that confuse the parser
-                cleaned_str = json_str.replace('\\', '').replace('\n', ' ').strip()
                 return json.loads(cleaned_str)
             except json.JSONDecodeError as e:
-                # If the first attempt fails, try a slightly less aggressive clean (remove only newlines)
-                try:
-                    cleaned_str = json_str.replace('\n', ' ').strip()
-                    return json.loads(cleaned_str)
-                except json.JSONDecodeError:
-                    raise e # Re-raise the original error if both fail
+                print(f"ERROR parsing LLM JSON: {e}")
+                # Re-raise with the error message
+                raise e
 
-        # --- END NEW ROBUST FIX ---
-        
-        # If no JSON was found or parsing failed, we hit this final except block
+        # If no JSON was found, we raise the final error
         raise json.JSONDecodeError("No valid JSON structure found in LLM output.", llm_output_str, 0)
             
     def _run_fast_loop(self, mission_plan_path):
         """
         Runs the *entire* PPO training loop for the "Fighter Pilot".
         """
-        # The imports for FastGymEnv and FighterPilot are correct at the top of the file
         env = FastGymEnv(
             mission_plan_path=mission_plan_path,
             benchmark_worker=self.worker,
