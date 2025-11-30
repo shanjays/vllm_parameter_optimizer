@@ -25,8 +25,7 @@ class BenchmarkWorker:
         try:
             import vllm
             vllm_lib_path = os.path.dirname(vllm.__file__)
-            # Note: vllm 0.10.2 might have a different config path
-            # We'll try the old one, but add a fallback.
+            # vllm 0.10.2 has a different path
             self.vllm_config_dir = os.path.join(
                 vllm_lib_path, "model_executor/layers/fused_moe/configs/"
             )
@@ -75,9 +74,7 @@ class BenchmarkWorker:
             "--num-tokens", str(static_args['num_tokens']),
             "--dtype", static_args['dtype'],
             "--num-iters", str(static_args['num_iters']),
-            # --- THIS IS THE FIX ---
             "--num-warmup-iters", "1", # This argument was missing
-            # --- END FIX ---
         ]
         
         full_command = ncu_command + python_command
@@ -93,13 +90,30 @@ class BenchmarkWorker:
             print(f"[BenchmarkWorker] ERROR: NCU run timed out on GPU {self.gpu_id}.")
             return None, -100.0, None
 
+        # --- THIS IS THE FIX: Robust CSV Parsing ---
         try:
+            csv_data = ""
+            metrics = {'sm': [], 'dram': [], 'l1': [], 'l2': []}
+            row_count = 0
+
             with open(self.ncu_log_path, 'r') as f:
-                csv_data = f.read()
-                csv_reader = csv.DictReader(StringIO(csv_data))
+                # 1. Find the real header row, skipping garbage lines
+                header_line = None
+                for line in f:
+                    csv_data += line # Store all data for the reward fn
+                    # A real ncu header will start with "ID" or "Kernel Name"
+                    if line.strip().startswith('"ID"') or line.strip().startswith('"Kernel Name"'):
+                        header_line = line
+                        break
                 
-                metrics = {'sm': [], 'dram': [], 'l1': [], 'l2': []}
-                row_count = 0
+                # If we never found a header, ncu failed
+                if header_line is None:
+                    raise Exception("NCU ran but did not produce a valid CSV header. Check ptrace_scope or permissions.")
+
+                # 2. We found the header. Now, process the *rest* of the file.
+                # We combine the header_line we found with the rest of the lines
+                csv_reader = csv.DictReader([header_line] + f.readlines())
+                
                 for row in csv_reader:
                     try:
                         metrics['sm'].append(float(row['sm__throughput.avg.pct_of_peak_sustained_elapsed']))
@@ -107,22 +121,25 @@ class BenchmarkWorker:
                         metrics['l1'].append(float(row['l1tex__t_sector_hit_rate.pct']))
                         metrics['l2'].append(float(row['lts__t_sector_hit_rate.pct']))
                         row_count += 1
-                    except (KeyError, ValueError, TypeError):
-                        print(f"[BenchmarkWorker] WARNING: Skipping malformed NCU row: {row}")
+                    except (KeyError, ValueError, TypeError) as e:
+                        print(f"[BenchmarkWorker] WARNING: Skipping malformed/unexpected NCU row. Error: {e}. Row: {row}")
                         continue
-                
-                if row_count == 0:
-                    raise Exception(f"NCU ran but found 0 valid kernels matching '{static_args['kernel_name']}'. Check ptrace_scope.")
-                
-                state = np.array([
-                    np.mean(metrics['sm']),
-                    np.mean(metrics['dram']),
-                    np.mean(metrics['l1']),
-                    np.mean(metrics['l2'])
-                ], dtype=np.float32)
-                
-                reward = self._calculate_reward(state, reward_weights)
-                return state, reward, csv_data
+            
+            # This check is still valid
+            if row_count == 0:
+                raise Exception(f"NCU ran but found 0 valid kernels matching '{static_args['kernel_name']}'.")
+            
+            # --- END FIX ---
+
+            state = np.array([
+                np.mean(metrics['sm']),
+                np.mean(metrics['dram']),
+                np.mean(metrics['l1']),
+                np.mean(metrics['l2'])
+            ], dtype=np.float32)
+            
+            reward = self._calculate_reward(state, reward_weights)
+            return state, reward, csv_data
 
         except Exception as e:
             print(f"[BenchmarkWorker] ERROR: NCU CSV parsing failed on GPU {self.gpu_id}. {e}")
@@ -152,8 +169,12 @@ class BenchmarkWorker:
             print(f"[BenchmarkWorker] ERROR: vLLM import failed in worker. {e}")
             return 0.0
 
-        # We must use the static_args from the main script, not define them here
-        static_args = STATIC_ARGS_FOR_HAKT 
+        # This is a bit of a hack. We should pass static_args to the worker.
+        # For now, we'll hardcode the values we know.
+        static_args = {
+            "num_experts": 128,
+            "inter_size": 1536,
+        }
         E = static_args['num_experts']    
         N = static_args['inter_size'] // 2 
         
