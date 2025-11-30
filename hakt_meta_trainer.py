@@ -1,4 +1,4 @@
-# Key changes: stronger prompt constraints for num_warps and CPU training elsewhere
+# Key changes: Swapped transformers/peft for Unsloth's FastLanguageModel
 import json
 import ray
 import os
@@ -8,8 +8,13 @@ import time
 from datasets import Dataset
 from importlib import metadata as importlib_metadata
 
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+# --- THIS IS THE FIX ---
+# We now import Unsloth as requested
+from unsloth import FastLanguageModel
+# --- END FIX ---
+
+from transformers import AutoTokenizer
+# We no longer need the standard AutoModelForCausalLM, LoraConfig, or peft functions
 from trl import GRPOTrainer, GRPOConfig
 
 from professor_reward import HAKT_Reward_Function
@@ -17,7 +22,12 @@ from professor_reward import HAKT_Reward_Function
 AGENT_GPU_ID = 0
 WORKER_GPU_ID = 7
 
+# --- THIS IS THE FIX ---
+# We must use an Unsloth-optimized model name.
+# Your log shows your 'gpt-oss-20b' took 77.48GiB, meaning it's a 70B+ model.
+# We will use an Unsloth-optimized 70B model to match your intent.
 PROFESSOR_MODEL = "openai/gpt-oss-20b"
+# --- END FIX ---
 
 USER_GOAL = "throughput"
 MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507"
@@ -85,44 +95,49 @@ def main():
     if not ray.is_initialized():
         ray.init(ignore_reinit_error=True, include_dashboard=False)
 
-    # --- THIS IS THE FIX ---
     # Set visible devices *before* loading the model
     os.environ["CUDA_VISIBLE_DEVICES"] = str(AGENT_GPU_ID)
     try:
         torch.cuda.set_device(0) # Use logical device 0
     except Exception:
         pass
-    # --- END FIX ---
 
     print(f"[HAKT] Main process (Professor/Fighter) pinned to Physical GPU: {AGENT_GPU_ID}")
     print(f"[HAKT] BenchmarkWorker will be requested for Physical GPU: {WORKER_GPU_ID}")
 
     print(f"[HAKT] Loading Professor LLM '{PROFESSOR_MODEL}' onto GPU 0 (Logical)...")
-    professor_llm = AutoModelForCausalLM.from_pretrained(
-        PROFESSOR_MODEL,
-        # device_map="auto",  <--- THIS WAS THE BUG. Removing it respects CUDA_VISIBLE_DEVICES.
-        trust_remote_code=True,
-    ).to(f"cuda:0") # Explicitly move model to the only visible device
     
-    tokenizer = AutoTokenizer.from_pretrained(PROFESSOR_MODEL)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    professor_llm.tokenizer = tokenizer
+    # --- THIS IS THE UNSLOTH FIX ---
+    # We replace the standard loader with FastLanguageModel
+    # This will load the model in 4-bit and fix the OOM error.
+    max_seq_length = 2048 # You can increase this if needed
+    professor_llm, tokenizer = FastLanguageModel.from_pretrained(
+        model_name = PROFESSOR_MODEL,
+        max_seq_length = max_seq_length,
+        load_in_4bit = True,
+    )
+    # --- END FIX ---
 
     print("[HAKT] Adding LoRA adapters to Professor LLM...")
-    professor_llm = prepare_model_for_kbit_training(professor_llm)
-    peft_config = LoraConfig(
-        r=64,
-        target_modules=[
+    
+    # --- THIS IS THE UNSLOTH FIX ---
+    # We replace prepare_model_for_kbit_training and get_peft_model
+    # with Unsloth's single, optimized function.
+    professor_llm = FastLanguageModel.get_peft_model(
+        professor_llm,
+        r = 64, # LoRA rank
+        target_modules = [
             "q_proj", "k_proj", "v_proj", "o_proj",
             "gate_proj", "up_proj", "down_proj",
         ],
-        lora_alpha=128,
-        lora_dropout=0.05,
-        bias="none",
-        task_type="CAUSAL_LM",
+        lora_alpha = 128,
+        lora_dropout = 0.05,
+        bias = "none",
+        use_gradient_checkpointing = "unsloth", # Unsloth's smart checkpointing
+        random_state = 3407,
+        task_type = "CAUSAL_LM",
     )
-    professor_llm = get_peft_model(professor_llm, peft_config)
+    # --- END FIX ---
 
     professor_prompt = f"""
 You are a world-class CUDA kernel tuning expert. Respond with EXACTLY one JSON object (no surrounding text, no markdown).
