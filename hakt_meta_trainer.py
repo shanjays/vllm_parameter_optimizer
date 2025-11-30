@@ -5,19 +5,27 @@ import subprocess
 import torch
 import time
 from datasets import Dataset
-from unsloth import FastLanguageModel
+
+# --- THIS IS THE FIX ---
+# We are now using "native" transformers libraries, NOT Unsloth
+from transformers import TrainingArguments, AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import GRPOConfig, GRPOTrainer
-from transformers import TrainingArguments
+# --- END FIX ---
+
 from professor_reward import HAKT_Reward_Function # The "Slow Loop" reward
 
 # --- HAKT-R Configuration ---
 AGENT_GPU_ID = 0  # Physical ID for Professor/Fighter
 WORKER_GPU_ID = 7 # Physical ID for BenchmarkWorker
 
+# --- YOUR REQUESTED MODEL ---
 PROFESSOR_MODEL = "openai/gpt-oss-20b" 
+# --- END ---
+
 USER_GOAL = "throughput" 
 MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507" 
-KERNEL_TO_TUNE = "fused_moe_kernel" # We will use this for regex matching
+KERNEL_TO_TUNE = "fused_moe_kernel" 
 RUN_SCRIPT_PATH = "run_moe_gym.py" 
 FAST_LOOP_STEPS = 100 
 LLM_TRAIN_STEPS = 50  
@@ -31,7 +39,7 @@ STATIC_ARGS_FOR_HAKT = {
     "hidden_size": 6144,
     "inter_size": 1536,
     "dtype": "fp16",
-    "num_iters": 1 # We'll keep this at 1
+    "num_iters": 1 
 }
 
 FULL_PARAM_SPACE = {
@@ -72,36 +80,29 @@ def get_initial_profile_data():
         "--dtype", STATIC_ARGS_FOR_HAKT["dtype"]
     ]
     
-    # --- THIS IS THE FIX ---
-    # The 'except' block is now much more detailed and will print
-    # the *actual* error message from NCU.
     try:
-        # We will run this and capture output
         result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=60, env=env)
         
-        # This part only runs if the command *succeeds*
         with open(ncu_log_file, 'r') as f:
             csv_data = f.read()
         print(f"[HAKT] Initial profile '{ncu_log_file}' created successfully.")
         return csv_data
 
     except subprocess.CalledProcessError as e:
-        # This part runs if the command fails (exit code 1)
         print("\n" + "="*80)
         print("[HAKT] ERROR: Initial profiling failed. The 'ncu' command returned a non-zero exit code.")
         print(f"Please ensure GPU {WORKER_GPU_ID} is available and ncu is installed.")
+        print("\n>>> DID YOU RUN 'sudo sysctl -w kernel.yama.ptrace_scope=0' ? <<<")
         print(f"\nCOMMAND THAT FAILED:\n{' '.join(e.cmd)}\n")
         print("\n--- NCU STANDARD OUTPUT (if any) ---")
         print(e.stdout)
         print("\n--- NCU STANDARD ERROR (THE *REAL* ERROR) ---")
         print(e.stderr)
         print("="*80 + "\n")
-        # Re-raise the exception to stop the script
         raise
     except Exception as e:
         print(f"[HAKT] ERROR: A Python-level error occurred: {e}")
         raise
-    # --- END FIX ---
 
 def main():
     initial_ncu_report = get_initial_profile_data()
@@ -117,31 +118,52 @@ def main():
 
     max_seq_length = 2048
     print(f"[HAKT] Loading Professor LLM '{PROFESSOR_MODEL}' onto GPU 0 (Logical)...")
-    professor_llm, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=PROFESSOR_MODEL,
-        max_seq_length=max_seq_length,
+
+    # --- THIS IS THE FIX: Native Hugging Face 4-bit loading ---
+    quantization_config = BitsAndBytesConfig(
         load_in_4bit=True,
-        device_map="auto", 
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.bfloat16
     )
+    
+    professor_llm = AutoModelForCausalLM.from_pretrained(
+        PROFESSOR_MODEL,
+        quantization_config=quantization_config,
+        device_map="auto", # This will place it on logical GPU 0
+        trust_remote_code=True,
+    )
+    
+    tokenizer = AutoTokenizer.from_pretrained(PROFESSOR_MODEL)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    # --- END FIX ---
 
     print("[HAKT] Adding LoRA adapters to Professor LLM...")
-    professor_llm = FastLanguageModel.get_peft_model(
-        professor_llm,
+    
+    # --- THIS IS THE FIX: Native PEFT LoRA adapter setup ---
+    professor_llm = prepare_model_for_kbit_training(professor_llm)
+    
+    peft_config = LoraConfig(
         r=64, 
         target_modules=[
             "q_proj", "k_proj", "v_proj", "o_proj",
             "gate_proj", "up_proj", "down_proj",
         ],
         lora_alpha=128,
-        use_gradient_checkpointing="unsloth", 
-        random_state=3407,
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM",
     )
+    
+    professor_llm = get_peft_model(professor_llm, peft_config)
+    # --- END FIX ---
 
     professor_prompt = f"""
 You are HAKT, a 'Kevin-style' CUDA tuning expert.
 The user's high-level goal is: **{USER_GOAL}**
 The hardware is: **NVIDIA H100**
-The target kernel regex is: **{KERNEL_TO_TUNE} (E=128, N=768)**
+The target kernel is: **{KERNEL_TO_TUNE} (E=128, N=768)**
 The full (unpruned) parameter space is:
 {json.dumps(FULL_PARAM_SPACE, indent=2)}
 
@@ -168,10 +190,12 @@ Generate the JSON plan:
         static_args=STATIC_ARGS_FOR_HAKT
     )
 
+    # This wrapper is still needed for the native TRL trainer
     def hakt_reward_function_wrapper(completions, **kwargs):
         return reward_fn_object(completions, **kwargs)
 
-    grpo_config = GRPOConfig(
+    # Note: We are now using the native TRL TrainingArguments, not Unsloth's
+    training_args = TrainingArguments(
         output_dir="hakt_professor_finetune",
         per_device_train_batch_size=1, 
         gradient_accumulation_steps=1,
@@ -180,23 +204,26 @@ Generate the JSON plan:
         max_steps=LLM_TRAIN_STEPS,
         save_steps=10, 
         logging_steps=1,
-        report_to="tensorboard",
-        
+        report_to="tensorboard", 
+        remove_unused_columns=False, # Important for TRL
+    )
+
+    grpo_config = GRPOConfig(
         temperature=0.7, 
         max_prompt_length=1024,
         max_completion_length=1024,
         num_generations=4, 
-        
         loss_type="grpo", 
     )
 
     trainer = GRPOTrainer(
         model=professor_llm,
         tokenizer=tokenizer,
-        args=grpo_config,
+        args=training_args, # Pass the native TrainingArguments
         train_dataset=dataset,
         reward_funcs=[hakt_reward_function_wrapper], 
-        processing_class=tokenizer, 
+        peft_config=peft_config, # Pass the PEFT config
+        **grpo_config.to_dict(), # Unpack the GRPO config
     )
 
     print("\n--- [HAKT] Starting 'Slow Loop' Training for Professor LLM ---")
@@ -204,7 +231,8 @@ Generate the JSON plan:
     print("\n--- [HAKT] Professor LLM fine-tuning complete ---")
 
     final_model_path = "hakt_professor_final"
-    professor_llm.save_pretrained_merged(final_model_path, tokenizer)
+    trainer.model.save_pretrained(final_model_path) # Use standard peft save
+    tokenizer.save_pretrained(final_model_path)
     print(f"Final fine-tuned Professor LLM saved to: {final_model_path}")
     
     ray.shutdown()
@@ -212,5 +240,3 @@ Generate the JSON plan:
 
 if __name__ == "__main__":
     main()
-
-
