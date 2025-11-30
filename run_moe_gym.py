@@ -142,7 +142,7 @@ if __name__ == "__main__":
         default=1,
         help="Number of warmup runs (for JIT, etc.)"
     )
-    parser.add_argument(
+    parser.addD_argument(
         "--num-iters",
         type=int,
         default=0, # Set default to 0 for clean ncu runs
