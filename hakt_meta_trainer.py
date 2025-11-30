@@ -2,45 +2,23 @@ import json
 import ray
 import os
 import subprocess
-import torch
 import time
-from datasets import Dataset
+import torch
+from fast_gym_env import FastGymEnv
+from fighter_agent import FighterPilot
+from professor_agent import ProfessorAgent
+from benchmark_worker import BenchmarkWorker
 
-# --- THIS IS THE FIX ---
-# We no longer import BitsAndBytesConfig OR pass it to the model
-from transformers import TrainingArguments, AutoTokenizer, AutoModelForCausalLM
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-# We must import the *native* GRPOTrainer and GRPOConfig
-from trl import GRPOTrainer, GRPOConfig
-# --- END FIX ---
+# --- HAKT Configuration ---
+USER_GOAL = "throughput" # or "latency"
+MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507" # Model for "Slow Gym" validation
+KERNEL_TO_TUNE = "fused_moe_kernel"
+RUN_SCRIPT_PATH = "run_moe_gym.py" # The script for the "Fast Gym"
+PROFESSOR_MODEL = "gpt-oss-20b" # Your chosen reasoning LLM
+NUM_EPOCHS = 5           # Number of times the LLM will intervene
+STEPS_PER_EPOCH = 100    # Number of "Fast Loop" steps per epoch
 
-from professor_reward import HAKT_Reward_Function # The "Slow Loop" reward
-
-# --- HAKT-R Configuration ---
-AGENT_GPU_ID = 0  # Physical ID for Professor/Fighter
-WORKER_GPU_ID = 7 # Physical ID for BenchmarkWorker
-
-PROFESSOR_MODEL = "openai/gpt-oss-20b" 
-
-USER_GOAL = "throughput" 
-MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507" 
-KERNEL_TO_TUNE = "fused_moe_kernel" 
-RUN_SCRIPT_PATH = "run_moe_gym.py" 
-FAST_LOOP_STEPS = 100 
-LLM_TRAIN_STEPS = 50  
-
-STATIC_ARGS_FOR_HAKT = {
-    "run_script_path": RUN_SCRIPT_PATH,
-    "kernel_name": KERNEL_TO_TUNE, 
-    "num_tokens": 16088,
-    "num_experts": 128,
-    "top_k": 2,
-    "hidden_size": 6144,
-    "inter_size": 1536,
-    "dtype": "fp16",
-    "num_iters": 1 
-}
-
+# (This is the *full* space, before the LLM prunes it)
 FULL_PARAM_SPACE = {
     "BLOCK_SIZE_M": [16, 32, 64, 128, 256],
     "BLOCK_SIZE_N": [32, 64, 128, 256],
@@ -50,186 +28,143 @@ FULL_PARAM_SPACE = {
 }
 # -----------------------------
 
-def get_initial_profile_data():
+def get_initial_profile(benchmark_worker):
     """
-    Runs ncu *once* with default config to get the 'goldmine' report.
-    This must be run *before* Ray is initialized.
+    Runs ncu *once* on the benchmark worker (GPU 1) to get the 'goldmine' report.
     """
-    print("[HAKT] Running initial profile (pre-flight check)...")
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(WORKER_GPU_ID) 
+    print("[HAKT] Running initial profile on BenchmarkWorker...")
     
-    ncu_log_file = "initial_profile.csv"
+    # Static args for the "Fast Gym"
+    static_args = {
+        "run_script_path": RUN_SCRIPT_PATH,
+        "kernel_name": KERNEL_TO_TUNE,
+        "num_tokens": 16088, # "sweet spot"
+        "num_experts": 64, "top_k": 2,
+        "hidden_size": 6144, "inter_size": 11008,
+        "dtype": "fp16", "num_iters": 0
+    }
     
-    command = [
-        "ncu", "--csv",
-        "--kernel-name", KERNEL_TO_TUNE, 
-        "--metrics", "sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed,lts__t_sector_hit_rate.pct,l1tex__t_sector_hit_rate.pct",
-        "--target-processes", "all",
-        "--force-overwrite",
-        "--log-file", ncu_log_file,
-        "python", RUN_SCRIPT_PATH,
-        "--num-tokens", str(STATIC_ARGS_FOR_HAKT["num_tokens"]), 
-        "--num-iters", str(STATIC_ARGS_FOR_HAKT["num_iters"]), 
-        "--num-warmup-iters", "1",
-        "--num-experts", str(STATIC_ARGS_FOR_HAKT["num_experts"]),
-        "--top-k", str(STATIC_ARGS_FOR_HAKT["top_k"]),
-        "--hidden-size", str(STATIC_ARGS_FOR_HAKT["hidden_size"]),
-        "--inter-size", str(STATIC_ARGS_FOR_HAKT["inter_size"]),
-        "--dtype", STATIC_ARGS_FOR_HAKT["dtype"]
-    ]
+    # Run the benchmark using the default config (None)
+    result_id = benchmark_worker.run_fast_gym_benchmark.remote(
+        params_dict=None, 
+        static_args=static_args,
+        reward_weights={} # Not needed, we just want the CSV
+    )
     
-    try:
-        result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=60, env=env)
+    # Wait for the result from GPU 1
+    state, reward, csv_data = ray.get(result_id)
+    
+    if csv_data is None:
+        raise Exception("Initial profiling failed. Check BenchmarkWorker logs.")
         
-        with open(ncu_log_file, 'r') as f:
-            csv_data = f.read()
-        print(f"[HAKT] Initial profile '{ncu_log_file}' created successfully.")
-        return csv_data
-
-    except subprocess.CalledProcessError as e:
-        print("\n" + "="*80)
-        print("[HAKT] ERROR: Initial profiling failed. The 'ncu' command returned a non-zero exit code.")
-        print(f"Please ensure GPU {WORKER_GPU_ID} is available and ncu is installed.")
-        print("\n>>> DID YOU RUN 'sudo sysctl -w kernel.yama.ptrace_scope=0' ? <<<")
-        print(f"\nCOMMAND THAT FAILED:\n{' '.join(e.cmd)}\n")
-        print("\n--- NCU STANDARD OUTPUT (if any) ---")
-        print(e.stdout)
-        print("\n--- NCU STANDARD ERROR (THE *REAL* ERROR) ---")
-        print(e.stderr)
-        print("="*80 + "\n")
-        raise
-    except Exception as e:
-        print(f"[HAKT] ERROR: A Python-level error occurred: {e}")
-        raise
+    print("[HAKT] Initial profile complete.")
+    return csv_data, state, static_args # Return all info
 
 def main():
-    initial_ncu_report = get_initial_profile_data()
+    # Initialize Ray to use all available GPUs (assumes >= 2)
+    ray.init()
+    
+    available_gpus = ray.available_resources().get("GPU", 0)
+    if available_gpus < 2:
+        print(f"ERROR: HAKT requires at least 2 GPUs, but found {available_gpus}.")
+        ray.shutdown()
+        return
 
-    if not ray.is_initialized():
-        ray.init(ignore_reinit_error=True)
+    # --- STAGE 1: MISSION BRIEFING ---
     
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(AGENT_GPU_ID)
-    torch.cuda.set_device(0) 
+    # Pin the BenchmarkWorker to 1 GPU. Ray will assign it one.
+    print("[HAKT] Assigning BenchmarkWorker to its own GPU...")
+    worker = BenchmarkWorker.options(num_gpus=1).remote()
     
-    print(f"[HAKT] Main process (Professor/Fighter) pinned to Physical GPU: {AGENT_GPU_ID}")
-    print(f"[HAKT] BenchmarkWorker will be requested for Physical GPU: {WORKER_GPU_ID}")
+    # Wait for the worker to start and get its GPU ID
+    worker_gpu_id = ray.get(worker.get_gpu_id.remote())
+    print(f"[HAKT] BenchmarkWorker is live on GPU: {worker_gpu_id}")
 
-    max_seq_length = 2048
-    print(f"[HAKT] Loading Professor LLM '{PROFESSOR_MODEL}' onto GPU 0 (Logical)...")
+    # Assign the *other* GPU to the main process (agent training)
+    all_gpu_ids = list(range(int(available_gpus)))
+    agent_gpu_id = [gid for gid in all_gpu_ids if gid != worker_gpu_id][0]
+    
+    print(f"[HAKT] Main process (and FighterPilot) will run on GPU: {agent_gpu_id}")
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(agent_gpu_id)
+    # Verify torch sees the correct device
+    torch.cuda.set_device(0) # Torch will now see agent_gpu_id as 'cuda:0'
+    print(f"[HAKT] Torch context set to: {torch.cuda.current_device()}")
 
-    # --- THIS IS THE FIX ---
-    # The BitsAndBytesConfig object was removed.
-    # We are now letting transformers load the model's native Mxfp4Config.
     
-    professor_llm = AutoModelForCausalLM.from_pretrained(
-        PROFESSOR_MODEL,
-        # We REMOVED the 'quantization_config=...' line
-        device_map="auto", 
-        trust_remote_code=True,
-    )
-    # --- END FIX ---
+    initial_csv_data, initial_state, static_args = get_initial_profile(worker)
     
-    tokenizer = AutoTokenizer.from_pretrained(PROFESSOR_MODEL)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    print("[HAKT] Adding LoRA adapters to Professor LLM...")
+    professor = ProfessorAgent(model_name=PROFESSOR_MODEL, user_goal=USER_GOAL)
     
-    # We *still* need to prepare the k-bit model for training
-    professor_llm = prepare_model_for_kbit_training(professor_llm)
-    
-    peft_config = LoraConfig(
-        r=64, 
-        target_modules=[
-            "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj",
-        ],
-        lora_alpha=128,
-        lora_dropout=0.05,
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
-    
-    professor_llm = get_peft_model(professor_llm, peft_config)
-
-    professor_prompt = f"""
-You are HAKT, a 'Kevin-style' CUDA tuning expert.
-The user's high-level goal is: **{USER_GOAL}**
-The hardware is: **NVIDIA H100**
-The target kernel is: **{KERNEL_TO_TUNE} (E=128, N=768)**
-The full (unpruned) parameter space is:
-{json.dumps(FULL_PARAM_SPACE, indent=2)}
-
-Here is the initial ncu report using the default config:
-```csv
-{initial_ncu_report}
-```
-Analyze the bottlenecks...
-Generate the JSON plan:
-```json
-"""
-    
-    dataset = Dataset.from_list(
-        [{"prompt": professor_prompt}] * LLM_TRAIN_STEPS
+    current_plan_path = professor.create_initial_plan(
+        initial_csv_data,
+        FULL_PARAM_SPACE,
+        initial_state
     )
 
-    print("[HAKT] Initializing HAKT Reward Function...")
+    # --- STAGE 2: "FAST LOOP" TRAINING ---
     
-    reward_fn_object = HAKT_Reward_Function(
-        user_goal=USER_GOAL,
-        model_name=MODEL_NAME,
-        fast_loop_steps=FAST_LOOP_STEPS,
-        worker_gpu_id=WORKER_GPU_ID, 
-        static_args=STATIC_ARGS_FOR_HAKT
+    # Initialize the "Gym" and the "Fighter Pilot" on GPU 0
+    # Pass the Ray handle for the worker to the Gym
+    env = FastGymEnv(
+        mission_plan_path=current_plan_path,
+        benchmark_worker=worker,
+        static_args=static_args,
+        initial_state=initial_state
     )
+    
+    pilot = FighterPilot(env, log_dir="./hakt_logs/fighter_pilot/")
 
-    def hakt_reward_function_wrapper(completions, **kwargs):
-        return reward_fn_object(completions, **kwargs)
+    all_top_results = []
+    
+    for epoch in range(1, NUM_EPOCHS + 1):
+        print(f"\n--- HAKT Epoch {epoch}/{NUM_EPOCHS} (Training on GPU {agent_gpu_id}) ---")
+        
+        # 1. Train the "Fighter Pilot" (PPO.learn() runs on GPU 0)
+        #    This will call env.step(), which triggers the worker on GPU 1
+        pilot.train_epoch(steps=STEPS_PER_EPOCH)
+        
+        # 2. Get the LA's best results
+        top_epoch_results = env.get_top_results(n=5)
+        all_top_results.extend(top_epoch_results)
+        
+        if epoch < NUM_EPOCHS:
+            # 3. "Professor" (on CPU) refines the plan
+            current_plan_path = professor.refine_plan(
+                current_plan_path,
+                top_epoch_results,
+                epoch_num = epoch + 1
+            )
+            # 4. Re-configure the gym (on GPU 0) with the *new* plan
+            env.set_mission_plan(current_plan_path)
+            # We also re-set the env on the pilot model
+            pilot.model.set_env(env.env)
 
-    # We merge all TrainingArguments *into* the GRPOConfig
-    grpo_config = GRPOConfig(
-        # TrainingArguments
-        output_dir="hakt_professor_finetune",
-        per_device_train_batch_size=4, # Must be >= num_generations
-        gradient_accumulation_steps=1,
-        learning_rate=2e-5, 
-        num_train_epochs=1, 
-        max_steps=LLM_TRAIN_STEPS,
-        save_steps=10, 
-        logging_steps=1,
-        report_to="tensorboard", 
-        remove_unused_columns=False, 
-
-        # GRPOConfig
-        temperature=0.7, 
-        max_prompt_length=1024,
-        max_completion_length=1024,
-        num_generations=4, 
-        loss_type="grpo", 
+    # --- STAGE 3: FINAL VALIDATION ---
+    
+    # Get the unique, all-time best configs from the LA's training
+    all_top_results = sorted(all_top_results, key=lambda x: x[2], reverse=True)
+    unique_top_configs = []
+    seen_params = set()
+    for res in all_top_results:
+        params_str = json.dumps(res[0])
+        if params_str not in seen_params:
+            unique_top_configs.append(res)
+            seen_params.add(params_str)
+        if len(unique_top_configs) >= 5: # Get Top 5 unique configs
+            break
+            
+    # "Professor" (on CPU) tells the "Worker" (on GPU 1)
+    # to run the final system-level benchmarks
+    best_overall_config = professor.run_final_validation(
+        unique_top_configs,
+        MODEL_NAME,
+        worker # Pass the worker handle
     )
-
-    # The native GRPOTrainer takes 'args=grpo_config'
-    trainer = GRPOTrainer(
-        model=professor_llm,
-        args=grpo_config, 
-        train_dataset=dataset,
-        reward_funcs=[hakt_reward_function_wrapper],
-        tokenizer=tokenizer, # Tokenizer *is* needed for native TRL
-        peft_config=peft_config, # Pass the PEFT config
-    )
-
-    print("\n--- [HAKT] Starting 'Slow Loop' Training for Professor LLM ---")
-    trainer.train()
-    print("\n--- [HAKT] Professor LLM fine-tuning complete ---")
-
-    final_model_path = "hakt_professor_final"
-    trainer.model.save_pretrained(final_model_path) 
-    tokenizer.save_pretrained(final_model_path)
-    print(f"Final fine-tuned Professor LLM saved to: {final_model_path}")
+    
+    print(f"\n[HAKT] Final optimal config: {best_overall_config}")
     
     ray.shutdown()
-    print("[HAKT] System shutdown complete.")
+    print("[HAKT] Tuning complete.")
 
 if __name__ == "__main__":
     main()
