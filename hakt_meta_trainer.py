@@ -6,13 +6,11 @@ import torch
 import time
 from datasets import Dataset
 
+# We no longer import BitsAndBytesConfig
 from transformers import TrainingArguments, AutoTokenizer, AutoModelForCausalLM
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+# We must import the *native* GRPOTrainer and GRPOConfig
 from trl import GRPOTrainer, GRPOConfig
-
-# --- REVISION ---
-# The bad import 'from professor_agent...' has been REMOVED.
-# --- END REVISION ---
 
 from professor_reward import HAKT_Reward_Function # The "Slow Loop" reward
 
@@ -180,6 +178,7 @@ Generate the JSON plan:
     def hakt_reward_function_wrapper(completions, **kwargs):
         return reward_fn_object(completions, **kwargs)
 
+    # We merge all TrainingArguments *into* the GRPOConfig
     grpo_config = GRPOConfig(
         # TrainingArguments
         output_dir="hakt_professor_finetune",
@@ -201,6 +200,9 @@ Generate the JSON plan:
         loss_type="grpo", 
     )
 
+    # --- THIS IS THE FIX ---
+    # The native GRPOTrainer *does* take 'tokenizer' and 'peft_config'
+    # My previous fix was wrong, this is the correct API.
     trainer = GRPOTrainer(
         model=professor_llm,
         args=grpo_config, 
@@ -209,6 +211,7 @@ Generate the JSON plan:
         tokenizer=tokenizer, 
         peft_config=peft_config, 
     )
+    # --- END FIX ---
 
     print("\n--- [HAKT] Starting 'Slow Loop' Training for Professor LLM ---")
     trainer.train()
