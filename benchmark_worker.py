@@ -51,7 +51,7 @@ class BenchmarkWorker:
         Returns (state, reward, csv_data)
         """
         
-        # --- THIS IS THE FIX for Villain #3 (GROUP_SIZE_M) ---
+        # --- FIX for potential GROUP_SIZE_M error ---
         # 1. Start with the complete default config
         config_to_use = DEFAULT_CONFIG.copy()
         if params_dict:
@@ -97,7 +97,7 @@ class BenchmarkWorker:
             print(f"[BenchmarkWorker] ERROR: NCU run timed out on GPU {self.gpu_id}.")
             return None, -100.0, None
 
-        # --- THIS IS THE FIX for Villain #1 (CSV Parser) ---
+        # --- THIS IS THE FIX: Robust "Long Format" CSV Parsing ---
         try:
             csv_data = ""
             # We will group metrics by Kernel Name and Invocation ID
@@ -110,19 +110,20 @@ class BenchmarkWorker:
                 file_lines = []
                 for line in f:
                     csv_data += line # Store all data for the reward fn
-                    file_lines.append(line)
                     # A real ncu header will start with "ID" or "Kernel Name"
-                    if line.strip().startswith('"ID"') or line.strip().startswith('"Kernel Name"'):
+                    # We look for "ID" as it's more reliable
+                    if line.strip().startswith('"ID"'):
                         header_line = line
                         # The rest of the file is data
                         file_lines.extend(f.readlines())
                         break
                 
                 if header_line is None:
-                    raise Exception("NCU ran but did not produce a valid CSV header.")
+                    raise Exception("NCU ran but did not produce a valid CSV header (no 'ID' row found).")
 
                 # 2. We found the header. Process the data.
-                csv_reader = csv.DictReader(file_lines)
+                # We use the lines we've already read
+                csv_reader = csv.DictReader([header_line] + file_lines)
                 
                 for row in csv_reader:
                     try:
@@ -134,7 +135,8 @@ class BenchmarkWorker:
                         
                         # Store the metric value
                         metric_name = row['Metric Name']
-                        metric_value = float(row['Metric Value'])
+                        metric_value_str = row['Metric Value'].replace('%', '').strip()
+                        metric_value = float(metric_value_str)
                         
                         if metric_name == 'sm__throughput.avg.pct_of_peak_sustained_elapsed':
                             kernel_invocations[invocation_key]['sm'] = metric_value
@@ -146,7 +148,7 @@ class BenchmarkWorker:
                             kernel_invocations[invocation_key]['l2'] = metric_value
                             
                     except (KeyError, ValueError, TypeError) as e:
-                        # This warning is normal for garbage lines
+                        # This warning is normal for garbage lines that slip through
                         # print(f"[BenchmarkWorker] WARNING: Skipping malformed/unexpected NCU row. Error: {e}. Row: {row}")
                         continue
             
