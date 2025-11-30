@@ -66,23 +66,24 @@ class HAKT_Reward_Function:
         'completions' is a list of generated texts (the JSON plans).
         """
         rewards = []
-        for plan_str in completions:
+        for i, plan_str in enumerate(completions):
+            print(f"\n--- [RewardFn] Processing Mission Plan {i+1}/{len(completions)} ---")
+            is_valid_plan = True
+            
             try:
                 plan = self._extract_json(plan_str)
                 
                 # --- CRITICAL FIX: Clean the parsed object before serialization ---
                 plan = self._clean_non_json_types(plan)
                 
-                plan_file_path = f"temp_mission_plan_{int(time.time())}.json"
+                plan_file_path = f"temp_mission_plan_{int(time.time())}_{i}.json"
                 with open(plan_file_path, "w") as f:
-                    # json.dump can now fail if ast.literal_eval produced a non-serializable type 
-                    # other than set/Ellipsis, but our cleanup should minimize this.
                     json.dump(plan, f, indent=2) 
                     
-                print(f"[RewardFn] Starting 'Fast Loop' PPO training...")
+                print(f"[RewardFn] Starting 'Fast Loop' PPO training ({self.fast_loop_steps} steps)...")
                 top_5_configs = self._run_fast_loop(plan_file_path)
                 
-                print(f"[RewardFn] Starting 'Slow Gym' validation...")
+                print(f"[RewardFn] Starting 'Slow Gym' validation (Top 5 configs)...")
                 final_metric = self._run_slow_gym(top_5_configs)
                 
                 rewards.append(final_metric)
@@ -90,9 +91,34 @@ class HAKT_Reward_Function:
                 os.remove(plan_file_path) 
                 
             except Exception as e:
-                # This catches the error if _extract_json fails OR if json.dump fails
-                print(f"[RewardFn] ERROR: HAKT reward calculation failed. {e}")
+                # This catches errors from _extract_json, json.dump, or the fast loop
+                is_valid_plan = False
+                print(f"[RewardFn] ERROR: HAKT reward calculation failed. Reason: {e}")
                 rewards.append(0.0) # Penalize bad/unparseable plans
+                
+                # If the plan was invalid, we must still run the PPO agent on a default plan
+                # to get the PPO agent trained on something (this is handled by the try/except in _run_fast_loop/set_mission_plan)
+                if not is_valid_plan:
+                    print("[RewardFn] Plan failed. Running Fast Loop on default, penalized plan to ensure training progression.")
+                    # Run the Fast Loop on a default plan (which rewards 0.0)
+                    default_plan = {
+                        'reward_function': {'R_sm_throughput': 0.01}, 
+                        'pruned_action_space': {
+                            'BLOCK_SIZE_M': [64], 'BLOCK_SIZE_N': [64], 'BLOCK_SIZE_K': [32],
+                            'num_warps': [4], 'num_stages': [4]
+                        }
+                    }
+                    default_plan_path = f"temp_default_plan_{int(time.time())}_{i}.json"
+                    with open(default_plan_path, "w") as f:
+                        json.dump(default_plan, f, indent=2)
+                        
+                    try:
+                        self._run_fast_loop(default_plan_path)
+                    except Exception as fe:
+                        print(f"[RewardFn] WARNING: Default Fast Loop also failed. {fe}")
+                    finally:
+                        os.remove(default_plan_path)
+
         
         return rewards
 
@@ -102,8 +128,8 @@ class HAKT_Reward_Function:
         """
         
         # 1. Use regex to find the most likely JSON or Python dictionary block {..}.
+        # This is the most stable regex to capture the whole block, ignoring markdown ticks/text.
         # We use '.*' (greedy) inside the braces to capture the entire structure.
-        # This is more stable than the non-greedy search for complex outputs.
         match = re.search(r"(\{.*\})", llm_output_str, re.DOTALL) 
         
         json_str = None
@@ -139,6 +165,7 @@ class HAKT_Reward_Function:
                 return ast.literal_eval(cleaned_str)
             except (SyntaxError, ValueError, json.JSONDecodeError) as e:
                 # This catches the ':' expected error.
+                # Log the error and the problematic string portion
                 print(f"ERROR parsing LLM JSON: {e} --- Failing String: {cleaned_str[:120]}...")
                 raise e # Raise the last error encountered
 
@@ -164,6 +191,8 @@ class HAKT_Reward_Function:
         
         top_results = env.get_top_results(n=5)
         
+        print(f"[RewardFn] Fast Loop completed. Found {len(top_results)} unique results.")
+        
         env.close()
         del pilot
         del env
@@ -175,6 +204,7 @@ class HAKT_Reward_Function:
         Runs the 'vllm bench' validation on the "Slow Gym" (GPU 1).
         """
         if not top_configs_from_la:
+            print("[RewardFn] No valid configurations found for Slow Gym validation.")
             return 0.0 # No valid configs found
 
         validation_ids = []
@@ -185,13 +215,17 @@ class HAKT_Reward_Function:
             )
             validation_ids.append(job_id)
 
+        print(f"[RewardFn] Awaiting validation metrics for {len(top_configs_from_la)} configs from BenchmarkWorker...")
         validation_metrics = ray.get(validation_ids)
         
+        # 3. Find the best metric (the "reward" for the LLM)
         if self.user_goal == "throughput":
             best_metric = max(validation_metrics)
         else: # "latency"
-            # Filter out 0.0 (failed runs) before finding min
+            # Get min non-zero latency
             valid_latencies = [m for m in validation_metrics if m > 0]
-            best_metric = min(valid_latencies) if valid_latencies else 0.0
+            best_metric = min(valid_latencies) if valid_latencies else 0.0 
+            # (Note: for latency, GRPOTrainer should be set to *minimize* reward)
         
+        print(f"[RewardFn] Slow Gym validation complete. Best metric: {best_metric}")
         return best_metric
