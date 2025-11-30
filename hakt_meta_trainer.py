@@ -14,7 +14,7 @@ from professor_reward import HAKT_Reward_Function # The "Slow Loop" reward
 AGENT_GPU_ID = 0  # Physical ID for Professor/Fighter
 WORKER_GPU_ID = 7 # Physical ID for BenchmarkWorker
 
-PROFESSOR_MODEL = "openai/gpt-oss-20b" 
+PROFESSOR_MODEL = "gpt-oss-20b" 
 USER_GOAL = "throughput" 
 MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507" 
 KERNEL_TO_TUNE = "fused_moe_kernel" # We will use this for regex matching
@@ -24,14 +24,14 @@ LLM_TRAIN_STEPS = 50
 
 STATIC_ARGS_FOR_HAKT = {
     "run_script_path": RUN_SCRIPT_PATH,
-    "kernel_name": KERNEL_TO_TUNE, # Note: This is now a regex pattern
+    "kernel_name": KERNEL_TO_TUNE, 
     "num_tokens": 16088,
     "num_experts": 128,
     "top_k": 2,
     "hidden_size": 6144,
     "inter_size": 1536,
     "dtype": "fp16",
-    "num_iters": 1
+    "num_iters": 1 # We'll keep this at 1
 }
 
 FULL_PARAM_SPACE = {
@@ -56,16 +56,14 @@ def get_initial_profile_data():
     
     command = [
         "ncu", "--csv",
-        # --- FIX #1: Use regex to find the kernel ---
         "--kernel-name-regex", KERNEL_TO_TUNE, 
-        # --- End Fix ---
         "--metrics", "sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed,lts__t_sector_hit_rate.pct,l1tex__t_sector_hit_rate.pct",
         "--target-processes", "all",
         "--force-overwrite",
         "--log-file", ncu_log_file,
         "python", RUN_SCRIPT_PATH,
         "--num-tokens", str(STATIC_ARGS_FOR_HAKT["num_tokens"]), 
-        "--num-iters", str(STATIC_ARGS_FOR_HAKT["num_iters"]),
+        "--num-iters", str(STATIC_ARGS_FOR_HAKT["num_iters"]), 
         "--num-warmup-iters", "1",
         "--num-experts", str(STATIC_ARGS_FOR_HAKT["num_experts"]),
         "--top-k", str(STATIC_ARGS_FOR_HAKT["top_k"]),
@@ -74,19 +72,36 @@ def get_initial_profile_data():
         "--dtype", STATIC_ARGS_FOR_HAKT["dtype"]
     ]
     
+    # --- THIS IS THE FIX ---
+    # The 'except' block is now much more detailed and will print
+    # the *actual* error message from NCU.
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True, timeout=60, env=env)
+        # We will run this and capture output
+        result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=60, env=env)
+        
+        # This part only runs if the command *succeeds*
         with open(ncu_log_file, 'r') as f:
             csv_data = f.read()
         print(f"[HAKT] Initial profile '{ncu_log_file}' created successfully.")
         return csv_data
+
     except subprocess.CalledProcessError as e:
-        print(f"[HAKT] ERROR: Initial profiling failed. {e.stderr}")
+        # This part runs if the command fails (exit code 1)
+        print("\n" + "="*80)
+        print("[HAKT] ERROR: Initial profiling failed. The 'ncu' command returned a non-zero exit code.")
         print(f"Please ensure GPU {WORKER_GPU_ID} is available and ncu is installed.")
+        print(f"\nCOMMAND THAT FAILED:\n{' '.join(e.cmd)}\n")
+        print("\n--- NCU STANDARD OUTPUT (if any) ---")
+        print(e.stdout)
+        print("\n--- NCU STANDARD ERROR (THE *REAL* ERROR) ---")
+        print(e.stderr)
+        print("="*80 + "\n")
+        # Re-raise the exception to stop the script
         raise
     except Exception as e:
-        print(f"[HAKT] ERROR: {e}")
+        print(f"[HAKT] ERROR: A Python-level error occurred: {e}")
         raise
+    # --- END FIX ---
 
 def main():
     initial_ncu_report = get_initial_profile_data()
@@ -145,22 +160,16 @@ Generate the JSON plan:
 
     print("[HAKT] Initializing HAKT Reward Function...")
     
-    # --- FIX #2: Create the class *object* first ---
     reward_fn_object = HAKT_Reward_Function(
         user_goal=USER_GOAL,
         model_name=MODEL_NAME,
         fast_loop_steps=FAST_LOOP_STEPS,
-        worker_gpu_id=WORKER_GPU_ID, # Pass the PHYSICAL ID (7)
+        worker_gpu_id=WORKER_GPU_ID, 
         static_args=STATIC_ARGS_FOR_HAKT
     )
 
-    # --- FIX #2 (Continued): Create a wrapper function ---
-    # This wrapper "tricks" the GRPOTrainer into seeing a function
-    # that it can get the `__name__` from, but it calls our object.
     def hakt_reward_function_wrapper(completions, **kwargs):
-        # This is the "glue"
         return reward_fn_object(completions, **kwargs)
-    # --- End Fix ---
 
     grpo_config = GRPOConfig(
         output_dir="hakt_professor_finetune",
@@ -186,9 +195,7 @@ Generate the JSON plan:
         tokenizer=tokenizer,
         args=grpo_config,
         train_dataset=dataset,
-        # --- FIX #2 (Continued): Pass the *wrapper function* ---
         reward_funcs=[hakt_reward_function_wrapper], 
-        # --- End Fix ---
         processing_class=tokenizer, 
     )
 
@@ -205,5 +212,3 @@ Generate the JSON plan:
 
 if __name__ == "__main__":
     main()
-
-
