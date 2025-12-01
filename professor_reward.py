@@ -235,12 +235,9 @@ class HAKT_Reward_Function:
                     json_str = param_start_match.group(1).strip()
                     print("[RewardFn] Found truncated content after <param> tag, attempting recovery.")
                     # Try to fix truncated JSON
-                    recovered_json = self._fix_truncated_json(json_str)
+                    recovered_json = self._try_recover_json(json_str)
                     if recovered_json is not None:
-                        if isinstance(recovered_json, dict):
-                            return recovered_json
-                        else:
-                            print(f"[RewardFn] WARNING: Recovered JSON is {type(recovered_json)}, expected dict")
+                        return recovered_json
                 
                 # Fallback to brace matching
                 match = re.search(r'(\{.*\})', llm_output_str, re.DOTALL)
@@ -250,12 +247,9 @@ class HAKT_Reward_Function:
                     if match_partial:
                         json_str = match_partial.group(1).strip()
                         print("[RewardFn] Found partial JSON, attempting recovery.")
-                        recovered_json = self._fix_truncated_json(json_str)
+                        recovered_json = self._try_recover_json(json_str)
                         if recovered_json is not None:
-                            if isinstance(recovered_json, dict):
-                                return recovered_json
-                            else:
-                                print(f"[RewardFn] WARNING: Recovered JSON is {type(recovered_json)}, expected dict")
+                            return recovered_json
                     
                     salvage = self._try_salvage_plan(llm_output_str)
                     if salvage is not None:
@@ -263,13 +257,6 @@ class HAKT_Reward_Function:
                     print("[RewardFn] No braces found; using default-safe plan for this completion.")
                     return self._default_safe_plan()
                 json_str = match.group(0).strip()
-                
-                salvage = self._try_salvage_plan(llm_output_str)
-                if salvage is not None:
-                    return salvage
-                print("[RewardFn] No braces found; using default-safe plan for this completion.")
-                return self._default_safe_plan()
-            json_str = match.group(0).strip()
 
         json_str = json_str.replace('```json', '').replace('```', '').strip()
 
@@ -328,6 +315,19 @@ class HAKT_Reward_Function:
                     return ast.literal_eval(normalized)
                 except Exception:
                     return self._default_safe_plan()
+
+    def _try_recover_json(self, json_str):
+        """
+        Try to recover a valid dict from a potentially truncated JSON string.
+        Returns a dict if successful, None otherwise.
+        """
+        recovered_json = self._fix_truncated_json(json_str)
+        if recovered_json is not None:
+            if isinstance(recovered_json, dict):
+                return recovered_json
+            else:
+                print(f"[RewardFn] WARNING: Recovered JSON is {type(recovered_json)}, expected dict")
+        return None
 
     def _fix_truncated_json(self, json_str):
         """Attempt to fix truncated JSON by adding missing brackets."""

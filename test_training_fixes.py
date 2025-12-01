@@ -3,6 +3,10 @@ Tests for training fixes:
 1. JSON parsing with garbage text before <param> tags
 2. Action space validation (must have >= 2 combinations)
 3. DEFAULT_MISSION_PLAN usage
+
+Note: The validation functions are duplicated here instead of importing from 
+professor_reward.py to avoid dependency on ray, vllm, and other heavy dependencies
+that would make these tests harder to run in isolation.
 """
 
 import json
@@ -12,8 +16,8 @@ import os
 import sys
 import tempfile
 
-# Import the DEFAULT_MISSION_PLAN from professor_reward
-# We'll test the logic directly here
+# Define the same constants and functions as in professor_reward.py
+# This allows tests to run without heavy dependencies (ray, vllm, etc.)
 DEFAULT_MISSION_PLAN = {
     "reward_function": {
         "R_sm_throughput": 0.4,
