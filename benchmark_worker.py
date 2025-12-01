@@ -71,11 +71,23 @@ class BenchmarkWorker:
             return False
         return True
 
-    def run_fast_gym_benchmark(self, params_dict, static_args, reward_weights):
+    def run_fast_gym_benchmark(self, params_dict, static_args, reward_weights, num_tokens=None):
         """
         Runs the 'Fast Gym' (ncu) on this worker's GPU (GPU 1).
         Returns (state, reward, csv_data)
+        
+        Args:
+            params_dict: Kernel configuration parameters
+            static_args: Static arguments for the benchmark
+            reward_weights: Weights for reward calculation
+            num_tokens: Override token count (for multi-token testing)
         """
+        
+        # Use override token count if provided
+        effective_static_args = static_args
+        if num_tokens is not None:
+            effective_static_args = static_args.copy()
+            effective_static_args['num_tokens'] = num_tokens
         
         # --- FIX for GROUP_SIZE_M error ---
         config_to_use = DEFAULT_CONFIG.copy()
@@ -99,7 +111,7 @@ class BenchmarkWorker:
 
         ncu_command = [
             "ncu", "--csv",
-            "--kernel-name", static_args['kernel_name'], 
+            "--kernel-name", effective_static_args['kernel_name'], 
             "--metrics", "sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed,lts__t_sector_hit_rate.pct,l1tex__t_sector_hit_rate.pct",
             "--target-processes", "all",
             "--force-overwrite",
@@ -107,15 +119,15 @@ class BenchmarkWorker:
         ]
 
         python_command = [
-            "python", static_args['run_script_path'],
+            "python", effective_static_args['run_script_path'],
             "--config-path", self.temp_config_path,
-            "--num-experts", str(static_args['num_experts']),
-            "--top-k", str(static_args['top_k']),
-            "--hidden-size", str(static_args['hidden_size']),
-            "--inter-size", str(static_args['inter_size']),
-            "--num-tokens", str(static_args['num_tokens']),
-            "--dtype", static_args['dtype'],
-            "--num-iters", str(static_args['num_iters']),
+            "--num-experts", str(effective_static_args['num_experts']),
+            "--top-k", str(effective_static_args['top_k']),
+            "--hidden-size", str(effective_static_args['hidden_size']),
+            "--inter-size", str(effective_static_args['inter_size']),
+            "--num-tokens", str(effective_static_args['num_tokens']),
+            "--dtype", effective_static_args['dtype'],
+            "--num-iters", str(effective_static_args['num_iters']),
             "--num-warmup-iters", "1", 
         ]
         
