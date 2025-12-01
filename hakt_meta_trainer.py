@@ -260,6 +260,10 @@ The JSON must be parseable by Python's json.loads() with no comments, trailing c
 8. NO comments, NO trailing commas, NO type names like "float" or "int"
 9. All numbers must be concrete values (e.g., 0.5, 64, not "0.5" or "float")
 
+=== CRITICAL: OUTPUT FORMAT ===
+Output ONLY the <param>...</param> block. Do NOT write lengthy analysis.
+Keep reasoning to 2-3 sentences maximum, then immediately output the JSON.
+
 === IMPORTANT ===
 Keep your reasoning BRIEF. Output the <param> JSON block IMMEDIATELY after minimal analysis.
 Do NOT write lengthy explanations. The JSON output is the ONLY thing that matters.
@@ -305,7 +309,7 @@ Analyze the NCU metrics and generate an optimized mission plan for the {KERNEL_T
         remove_unused_columns=False,
         temperature=0.7,
         max_prompt_length=2048,  # Increased from 1536 for longer prompts
-        max_completion_length=1024,  # Increased from 512 (but NOT 4096 to avoid OOM)
+        max_completion_length=2048,  # Increased from 1024 to avoid truncation before </param>
         num_generations=4,  # Increased from 2 for more diverse outputs
         loss_type="grpo",
     )
