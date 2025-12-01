@@ -63,7 +63,7 @@ STATIC_BENCHMARK_ARGS = {
     "top_k": 8,               # 8 experts ✅ (was 2)
     "hidden_size": 6656,      # ✅ (was 6144)
     "inter_size": 768,        # N=768 ✅ (was 1536)
-    "dtype": "bfloat16",      # bf16 for H100
+    "dtype": "bf16",      # bf16 for H100
     "num_iters": 3,
     "num_warmup_iters": 1,
 }
@@ -305,6 +305,7 @@ Output ONLY the <param>JSON</param> block. Keep reasoning minimal.
 
 if __name__ == "__main__":
     main()
+
 
 
 
