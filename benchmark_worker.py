@@ -6,34 +6,30 @@ import os
 import numpy as np
 from io import StringIO
 import time
-# We use lazy imports for vllm inside methods to save RAM
 
-# This is the "DEFAULT_CONFIG" your agent will be tuning
 DEFAULT_CONFIG = {
     "BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32,
     "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4,
 }
 
-# Error penalty constants for different failure types
 PENALTY_SHARED_MEMORY = -50.0
 PENALTY_REGISTER_OVERFLOW = -75.0
 PENALTY_TIMEOUT = -75.0
 PENALTY_PARSE_ERROR = -25.0
 PENALTY_TOTAL_FAILURE = -100.0
 
-# Retry configuration
 DEFAULT_MAX_RETRIES = 2
-DEFAULT_RETRY_DELAY = 1  # seconds between retries
-DEFAULT_NCU_TIMEOUT = 60  # seconds, increased from 30 to accommodate longer kernel runs
+DEFAULT_RETRY_DELAY = 1
+DEFAULT_NCU_TIMEOUT = 60
 
-@ray.remote(num_gpus=1) # This actor requires 1 GPU from Ray's pool
+@ray.remote(num_gpus=1)
 class BenchmarkWorker:
     def __init__(self, gpu_id):
         self.gpu_id = gpu_id
         pid = os.getpid()
         self.ncu_log_path = f"/tmp/hakt_ncu_log_gpu{self.gpu_id}_{pid}.csv"
         self.temp_config_path = f"/tmp/hakt_temp_config_gpu{self.gpu_id}_{pid}.json"
-        self.failed_configs = []  # Track failed configs for analysis
+        self.failed_configs = []
         self.max_retries = DEFAULT_MAX_RETRIES
         self.retry_delay = DEFAULT_RETRY_DELAY
         self.ncu_timeout = DEFAULT_NCU_TIMEOUT
@@ -41,7 +37,6 @@ class BenchmarkWorker:
         try:
             import vllm
             vllm_lib_path = os.path.dirname(vllm.__file__)
-            # vllm 0.10.2 might have a different config path
             self.vllm_config_dir = os.path.join(
                 vllm_lib_path, "model_executor/layers/fused_moe/configs/"
             )
@@ -62,74 +57,87 @@ class BenchmarkWorker:
         return self.gpu_id
 
     def _validate_triton_config(self, config):
-        """
-        Check if config fits H100 shared memory limit.
-        
-        H100 has 227KB (232,448 bytes) of shared memory per SM.
-        Shared memory usage ≈ (M*K + K*N) * 2 * stages bytes for FP16.
-        
-        Returns True if config is valid, False otherwise.
-        """
         M = config.get('BLOCK_SIZE_M', 64)
         N = config.get('BLOCK_SIZE_N', 64)
         K = config.get('BLOCK_SIZE_K', 32)
         stages = config.get('num_stages', 4)
         
-        # FP16 = 2 bytes per element
-        # Shared memory for A tile (M x K) and B tile (K x N)
         shared_mem = (M * K + K * N) * 2 * stages
-        
-        # H100 has 228KB shared memory per SM, we use conservative 227KB (232,448 bytes)
-        H100_LIMIT = 232448  # bytes (~227KB, conservative limit)
+        H100_LIMIT = 232448
         if shared_mem > H100_LIMIT:
             print(f"[BenchmarkWorker] Config exceeds shared memory: {shared_mem} bytes > {H100_LIMIT} bytes")
             print(f"[BenchmarkWorker] Offending config: BLOCK_SIZE_M={M}, BLOCK_SIZE_N={N}, BLOCK_SIZE_K={K}, num_stages={stages}")
             return False
         return True
 
+    def _reduce_config(self, config):
+        reduced = config.copy()
+        reductions = [
+            ('num_stages', lambda x: max(2, x - 1)),
+            ('BLOCK_SIZE_M', lambda x: max(16, x // 2)),
+            ('BLOCK_SIZE_K', lambda x: max(32, x // 2)),
+            ('BLOCK_SIZE_N', lambda x: max(32, x // 2)),
+        ]
+        for key, reduce_fn in reductions:
+            if key in reduced:
+                old_val = reduced[key]
+                new_val = reduce_fn(reduced[key])
+                if new_val < old_val:
+                    reduced[key] = new_val
+                    print(f"[BenchmarkWorker] Reduced {key}: {old_val} -> {new_val}")
+                    if self._validate_triton_config(reduced):
+                        return reduced
+        return None
+
+    def _categorize_error(self, stderr):
+        if stderr is None:
+            return "unknown", PENALTY_TOTAL_FAILURE
+        stderr_lower = stderr.lower() if isinstance(stderr, str) else str(stderr).lower()
+        if "shared memory" in stderr_lower:
+            return "shared_memory", PENALTY_SHARED_MEMORY
+        elif "register" in stderr_lower:
+            return "register_overflow", PENALTY_REGISTER_OVERFLOW
+        elif "timeout" in stderr_lower:
+            return "timeout", PENALTY_TIMEOUT
+        elif "oom" in stderr_lower or "out of memory" in stderr_lower:
+            return "cuda_oom", PENALTY_TOTAL_FAILURE
+        return "unknown", PENALTY_TOTAL_FAILURE
+
+    def _log_failed_config(self, config, error_type, error_msg):
+        self.failed_configs.append({
+            'config': config.copy(),
+            'error_type': error_type,
+            'error_msg': str(error_msg)[:200],
+            'timestamp': time.time()
+        })
+        if len(self.failed_configs) > 100:
+            self.failed_configs = self.failed_configs[-100:]
+
     def run_fast_gym_benchmark(self, params_dict, static_args, reward_weights, num_tokens=None):
-        """
-        Runs the 'Fast Gym' (ncu) on this worker's GPU.
-        Returns (state, reward, csv_data)
-        
-        Args:
-            params_dict: Kernel configuration parameters
-            static_args: Static arguments for the benchmark
-            reward_weights: Weights for reward calculation
-            num_tokens: Override token count (for multi-token testing)
-        """
-        
-        # Use override token count if provided
         effective_static_args = static_args
         if num_tokens is not None:
             effective_static_args = static_args.copy()
             effective_static_args['num_tokens'] = num_tokens
         
-        # --- FIX for GROUP_SIZE_M error ---
         config_to_use = DEFAULT_CONFIG.copy()
         if params_dict:
             config_to_use.update(params_dict)
         
-        # Validate num_warps is a power of 2
         num_warps = config_to_use.get('num_warps', 4)
         if num_warps <= 0 or (num_warps & (num_warps - 1)) != 0:
             print(f"[BenchmarkWorker] WARNING: Invalid num_warps={num_warps}, using 4")
             config_to_use['num_warps'] = 4
         
-        # Pre-flight validation with automatic reduction
         if not self._validate_triton_config(config_to_use):
             print(f"[BenchmarkWorker] Config exceeds limits, attempting reduction...")
             reduced_config = self._reduce_config(config_to_use)
-            
             if reduced_config is None:
                 print(f"[BenchmarkWorker] Cannot reduce config further, returning penalty")
-                self._log_failed_config(config_to_use, "shared_memory", "Config exceeds limits and cannot be reduced")
+                self._log_failed_config(config_to_use, "shared_memory", "Config exceeds limits")
                 return None, PENALTY_SHARED_MEMORY, None
-            
             config_to_use = reduced_config
             print(f"[BenchmarkWorker] Using reduced config: {config_to_use}")
         
-        # Retry loop
         last_error = None
         last_stderr = None
         
@@ -141,31 +149,31 @@ class BenchmarkWorker:
             with open(self.temp_config_path, "w") as f:
                 json.dump(config_to_use, f)
 
-        ncu_command = [
-            "ncu", "--csv",
-            "--kernel-name", effective_static_args['kernel_name'], 
-            "--metrics", "sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed,lts__t_sector_hit_rate.pct,l1tex__t_sector_hit_rate.pct",
-            "--target-processes", "all",
-            "--force-overwrite",
-            "--log-file", self.ncu_log_path,
-        ]
+            ncu_command = [
+                "ncu", "--csv",
+                "--kernel-name", effective_static_args['kernel_name'], 
+                "--metrics", "sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed,lts__t_sector_hit_rate.pct,l1tex__t_sector_hit_rate.pct",
+                "--target-processes", "all",
+                "--force-overwrite",
+                "--log-file", self.ncu_log_path,
+            ]
 
-        python_command = [
-            "python", effective_static_args['run_script_path'],
-            "--config-path", self.temp_config_path,
-            "--num-experts", str(effective_static_args['num_experts']),
-            "--top-k", str(effective_static_args['top_k']),
-            "--hidden-size", str(effective_static_args['hidden_size']),
-            "--inter-size", str(effective_static_args['inter_size']),
-            "--num-tokens", str(effective_static_args['num_tokens']),
-            "--dtype", effective_static_args['dtype'],
-            "--num-iters", str(effective_static_args['num_iters']),
-            "--num-warmup-iters", "1", 
-        ]
-        
-        full_command = ncu_command + python_command
-        env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id) 
+            python_command = [
+                "python", effective_static_args['run_script_path'],
+                "--config-path", self.temp_config_path,
+                "--num-experts", str(effective_static_args['num_experts']),
+                "--top-k", str(effective_static_args['top_k']),
+                "--hidden-size", str(effective_static_args['hidden_size']),
+                "--inter-size", str(effective_static_args['inter_size']),
+                "--num-tokens", str(effective_static_args['num_tokens']),
+                "--dtype", effective_static_args['dtype'],
+                "--num-iters", str(effective_static_args['num_iters']),
+                "--num-warmup-iters", "1", 
+            ]
+            
+            full_command = ncu_command + python_command
+            env = os.environ.copy()
+            env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
 
             try:
                 subprocess.run(
@@ -176,7 +184,6 @@ class BenchmarkWorker:
                     timeout=self.ncu_timeout,
                     env=env
                 )
-                # Success! Break out of retry loop
                 break
                 
             except subprocess.CalledProcessError as e:
@@ -184,8 +191,6 @@ class BenchmarkWorker:
                 last_stderr = e.stderr
                 error_type, penalty = self._categorize_error(e.stderr)
                 print(f"[BenchmarkWorker] NCU failed (attempt {attempt + 1}): {error_type}")
-                
-                # Don't retry for config-related errors
                 if error_type in ["shared_memory", "register_overflow"]:
                     self._log_failed_config(config_to_use, error_type, e.stderr)
                     return None, penalty, None
@@ -196,13 +201,11 @@ class BenchmarkWorker:
                 print(f"[BenchmarkWorker] NCU timed out (attempt {attempt + 1})")
                 
         else:
-            # All retries exhausted
             error_type, penalty = self._categorize_error(last_stderr)
             print(f"[BenchmarkWorker] All retries exhausted. Error type: {error_type}")
             self._log_failed_config(config_to_use, error_type, str(last_error))
             return None, penalty, None
 
-        # Parse NCU output
         try:
             csv_data = ""
             kernel_invocations = {}
@@ -284,10 +287,6 @@ class BenchmarkWorker:
         return float(reward)
 
     def run_slow_gym_validation(self, params_dict, model_name, user_goal):
-        """
-        Runs the 'Slow Gym' (vllm bench) on this worker's GPU (GPU 1).
-        """
-        
         try:
             import vllm
         except ImportError:
@@ -297,15 +296,12 @@ class BenchmarkWorker:
             print(f"[BenchmarkWorker] ERROR: vLLM import failed in worker. {e}")
             return 0.0
 
-        # Qwen 30B MoE configuration for vLLM config filename
-        # E = number of experts (128 for Qwen 30B)
-        # N = intermediate size for MoE FFN (inter_size value from model config)
         static_args = {
-            "num_experts": 128,  # Qwen 30B has 128 experts
-            "inter_size": 1536,  # Intermediate size from model config
+            "num_experts": 128,
+            "inter_size": 1536,
         }
         E = static_args['num_experts']    
-        N = static_args['inter_size']  # Use full inter_size, not halved
+        N = static_args['inter_size']
         
         config_filename = f"E={E},N={N},device_name=NVIDIA_H100_80GB_HBM3.json" 
         config_path = os.path.join(self.vllm_config_dir, config_filename)
