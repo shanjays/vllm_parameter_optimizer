@@ -214,39 +214,57 @@ class FeedbackCollector:
                 if len(self.failed_strategies) < 4:
                     self.failed_strategies.append(strategy)
     
-    def format_feedback_for_prompt(self, max_configs: int = 3) -> str:
-        """
-        Generate formatted feedback string for injection into the LLM prompt.
-        
-        Returns concise bullet points to prevent verbose LLM output.
-        
-        Args:
-            max_configs: Maximum number of best configs to include (default 3)
-        
-        Returns:
-            Formatted string containing feedback from previous iterations.
-            Returns empty string if no policies have been evaluated yet.
-        """
+    def format_feedback_for_prompt(self, max_configs: int = 5) -> str:
+        """Format feedback with kernel optimization insights."""
         if self.policies_evaluated == 0:
             return ""
         
         lines = []
+        lines.append("")
+        lines.append("═══════════════════════════════════════════════════════════════════════════════")
+        lines.append("                    FEEDBACK FROM PREVIOUS ITERATIONS")
+        lines.append("═══════════════════════════════════════════════════════════════════════════════")
+        lines.append("")
+        lines.append(f"Policies Evaluated: {self.policies_evaluated}")
+        lines.append(f"Best Reward Achieved: {self.best_overall_reward:.2f}")
         
-        # Concise header
-        lines.append(f"Previous Results ({self.policies_evaluated} policies tested):")
-        lines.append(f"- Best reward: {self.best_overall_reward:.1f}")
-        
-        # Top configs only (limited to max_configs)
         if self.best_configs_by_token:
-            lines.append("- Best configs found:")
-            sorted_configs = sorted(self.best_configs_by_token.items(), key=lambda x: int(x[0]))
-            for token_count, config_data in sorted_configs[:max_configs]:
-                config = config_data.get("config", {})
-                lines.append(f"  Token {token_count}: M={config.get('BLOCK_SIZE_M', '?')}, N={config.get('BLOCK_SIZE_N', '?')}, stages={config.get('num_stages', '?')}")
+            lines.append("")
+            lines.append("BEST CONFIGURATIONS FOUND:")
+            sorted_configs = sorted(self.best_configs_by_token.items(), key=lambda x: int(x[0]))[:max_configs]
+            
+            for tc, config_data in sorted_configs:
+                config = config_data.get('config', {})
+                reward = config_data.get('reward', 0)
+                M = config.get('BLOCK_SIZE_M', '?')
+                N = config.get('BLOCK_SIZE_N', '?')
+                K = config.get('BLOCK_SIZE_K', '?')
+                warps = config.get('num_warps', '?')
+                stages = config.get('num_stages', '?')
+                lines.append(f"  Token {tc}: reward={reward:.2f} | M={M}, N={N}, K={K}, warps={warps}, stages={stages}")
         
-        # Key insight (only the most recent successful strategy)
+        if self.best_policy_weights:
+            lines.append("")
+            lines.append("BEST OBJECTIVE WEIGHTS:")
+            weights = self.best_policy_weights
+            lines.append(f"  R_sm_throughput={weights.get('R_sm_throughput', 0):.2f}, R_dram_throughput={weights.get('R_dram_throughput', 0):.2f}, R_l1_hit_rate={weights.get('R_l1_hit_rate', 0):.2f}, R_l2_hit_rate={weights.get('R_l2_hit_rate', 0):.2f}")
+        
         if self.successful_strategies:
-            lines.append(f"- What worked: {self.successful_strategies[-1]}")
+            lines.append("")
+            lines.append("WHAT WORKED:")
+            for strategy in self.successful_strategies[-3:]:
+                lines.append(f"  ✓ {strategy}")
+        
+        if self.failed_strategies:
+            lines.append("")
+            lines.append("WHAT DID NOT WORK:")
+            for strategy in self.failed_strategies[-2:]:
+                lines.append(f"  ✗ {strategy}")
+        
+        lines.append("")
+        lines.append(f"YOUR GOAL: Generate a policy that beats the best reward of {self.best_overall_reward:.2f}")
+        lines.append("Use the insights above to inform your choices.")
+        lines.append("")
         
         return "\n".join(lines)
     

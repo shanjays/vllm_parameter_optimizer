@@ -149,10 +149,11 @@ def test_format_feedback_with_data():
         
         feedback = collector.format_feedback_for_prompt()
         
-        # Check that key sections are present (concise format)
-        assert "Previous Results (1 policies tested):" in feedback
-        assert "Best reward: 51.2" in feedback
-        assert "Best configs found:" in feedback
+        # Check that key sections are present (structured format)
+        assert "FEEDBACK FROM PREVIOUS ITERATIONS" in feedback
+        assert "Policies Evaluated: 1" in feedback
+        assert "Best Reward Achieved: 51.20" in feedback
+        assert "BEST CONFIGURATIONS FOUND:" in feedback
         assert "Token 1:" in feedback
         assert "Token 64:" in feedback
         
@@ -329,7 +330,7 @@ def test_reset():
 
 
 def test_feedback_includes_policy_weights():
-    """Test that formatted feedback includes what worked strategies."""
+    """Test that formatted feedback includes what worked strategies and objective weights."""
     temp_dir = tempfile.mkdtemp()
     try:
         state_file = os.path.join(temp_dir, "feedback_state.json")
@@ -348,12 +349,14 @@ def test_feedback_includes_policy_weights():
         
         feedback = collector.format_feedback_for_prompt()
         
-        # Check that feedback contains concise format and what worked
-        assert "Previous Results (1 policies tested):" in feedback
-        assert "Best reward: 50.0" in feedback
-        # Since we have successful strategies, we should see "What worked"
+        # Check that feedback contains structured format and objective weights
+        assert "FEEDBACK FROM PREVIOUS ITERATIONS" in feedback
+        assert "Policies Evaluated: 1" in feedback
+        assert "Best Reward Achieved: 50.00" in feedback
+        assert "BEST OBJECTIVE WEIGHTS:" in feedback
+        # Since we have successful strategies, we should see "WHAT WORKED"
         if collector.successful_strategies:
-            assert "What worked:" in feedback
+            assert "WHAT WORKED:" in feedback
         
         print("✅ test_feedback_includes_policy_weights PASSED")
     finally:
