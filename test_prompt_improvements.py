@@ -16,21 +16,21 @@ import os
 
 
 def test_max_completion_length():
-    """Test that MAX_COMPLETION_LENGTH is reduced to 256."""
-    print("\n=== Test: MAX_COMPLETION_LENGTH is 256 ===")
+    """Test that MAX_COMPLETION_LENGTH is increased to 1536."""
+    print("\n=== Test: MAX_COMPLETION_LENGTH is 1536 ===")
     
     with open('hierarchical_kernel_optimizer.py', 'r') as f:
         source = f.read()
     
-    # Check for MAX_COMPLETION_LENGTH = 256
-    pattern = r'MAX_COMPLETION_LENGTH\s*=\s*256'
+    # Check for MAX_COMPLETION_LENGTH = 1536
+    pattern = r'MAX_COMPLETION_LENGTH\s*=\s*1536'
     match = re.search(pattern, source)
     
     if match:
-        print("✅ MAX_COMPLETION_LENGTH is set to 256")
+        print("✅ MAX_COMPLETION_LENGTH is set to 1536")
         return True
     else:
-        print("❌ MAX_COMPLETION_LENGTH is NOT set to 256")
+        print("❌ MAX_COMPLETION_LENGTH is NOT set to 1536")
         return False
 
 
@@ -69,8 +69,8 @@ def test_summarize_ncu_report_functionality():
         (re.search(r'dram__throughput\.avg\.pct_of_peak_sustained_elapsed', source) is not None, "DRAM throughput regex"),
         (re.search(r'l1tex__t_sector_hit_rate\.pct', source) is not None, "L1 hit rate regex"),
         (re.search(r'lts__t_sector_hit_rate\.pct', source) is not None, "L2 hit rate regex"),
-        (re.search(r'def avg\(values\):', source) is not None, "avg helper function"),
-        (re.search(r'def range_str\(values\):', source) is not None, "range_str helper function"),
+        (re.search(r'def stats\(vals\):', source) is not None, "stats helper function"),
+        (re.search(r"'sm_throughput':\s*\[\]", source) is not None, "metrics dict structure"),
     ]
     
     all_passed = True
@@ -89,19 +89,21 @@ def test_summarize_ncu_report_functionality():
         return False
 
 
-def test_prompt_uses_chat_template():
-    """Test that build_optimization_prompt uses chat template format."""
-    print("\n=== Test: Prompt uses chat template format ===")
+def test_prompt_uses_expert_format():
+    """Test that build_optimization_prompt uses expert-level format with sections."""
+    print("\n=== Test: Prompt uses expert format with sections ===")
     
     with open('hierarchical_kernel_optimizer.py', 'r') as f:
         source = f.read()
     
-    # Check for chat template markers
+    # Check for expert format section headers
     checks = [
-        ('<|im_start|>system' in source, "<|im_start|>system present"),
-        ('<|im_end|>' in source, "<|im_end|> present"),
-        ('<|im_start|>user' in source, "<|im_start|>user present"),
-        ('<|im_start|>assistant' in source, "<|im_start|>assistant present"),
+        ('KERNEL DETAILS' in source, "KERNEL DETAILS section present"),
+        ('HARDWARE SPECS' in source, "HARDWARE SPECS section present"),
+        ('BASELINE PROFILING METRICS' in source, "BASELINE PROFILING METRICS section present"),
+        ('TUNING PARAMETERS' in source, "TUNING PARAMETERS section present"),
+        ('OBJECTIVE WEIGHTS' in source, "OBJECTIVE WEIGHTS section present"),
+        ('OUTPUT FORMAT (IMPORTANT!)' in source, "OUTPUT FORMAT section present"),
     ]
     
     all_passed = True
@@ -113,44 +115,44 @@ def test_prompt_uses_chat_template():
             all_passed = False
     
     if all_passed:
-        print("✅ Prompt uses chat template format")
+        print("✅ Prompt uses expert format with sections")
         return True
     else:
-        print("❌ Prompt does NOT use chat template format")
+        print("❌ Prompt does NOT use expert format with sections")
         return False
 
 
-def test_prompt_starts_assistant_with_param():
-    """Test that assistant response starts with <param> tag."""
-    print("\n=== Test: Assistant response starts with <param> ===")
+def test_prompt_ends_with_param():
+    """Test that prompt ends with <param> tag to encourage JSON-first output."""
+    print("\n=== Test: Prompt ends with <param> ===")
     
     with open('hierarchical_kernel_optimizer.py', 'r') as f:
         source = f.read()
     
-    # Check for <|im_start|>assistant followed by <param>
-    pattern = r'<\|im_start\|>assistant\s*\n<param>'
+    # Check for prompt ending with <param> followed by triple-quote
+    pattern = r"<param>\s*'''\s*\n\s*return optimization_prompt"
     match = re.search(pattern, source)
     
     if match:
-        print("✅ Assistant response starts with <param>")
+        print("✅ Prompt ends with <param>")
         return True
     else:
-        print("❌ Assistant response does NOT start with <param>")
+        print("❌ Prompt does NOT end with <param>")
         return False
 
 
-def test_prompt_emphasizes_json_only():
-    """Test that prompt emphasizes JSON-only output."""
-    print("\n=== Test: Prompt emphasizes JSON-only output ===")
+def test_prompt_json_first_format():
+    """Test that prompt instructs JSON-first output with reasoning after."""
+    print("\n=== Test: Prompt instructs JSON-first output ===")
     
     with open('hierarchical_kernel_optimizer.py', 'r') as f:
         source = f.read()
     
-    # Check for JSON-only emphasis in system message
+    # Check for JSON-first instructions
     checks = [
-        ('JSON policy generator' in source, "JSON policy generator mentioned"),
-        ('ONLY valid JSON' in source or 'output ONLY' in source.lower(), "ONLY JSON mentioned"),
-        ('No explanations' in source or 'nothing else' in source.lower(), "No explanations mentioned"),
+        ('Output your policy JSON FIRST' in source or 'FIRST: Output your policy JSON' in source, "JSON first instruction"),
+        ('THEN: Provide brief reasoning' in source or 'then provide brief reasoning' in source.lower(), "Reasoning after instruction"),
+        ('REASONING:' in source, "REASONING label in format"),
     ]
     
     all_passed = True
@@ -162,16 +164,16 @@ def test_prompt_emphasizes_json_only():
             all_passed = False
     
     if all_passed:
-        print("✅ Prompt emphasizes JSON-only output")
+        print("✅ Prompt instructs JSON-first output")
         return True
     else:
-        print("❌ Prompt does NOT emphasize JSON-only output")
+        print("❌ Prompt does NOT instruct JSON-first output")
         return False
 
 
-def test_feedback_concise_format():
-    """Test that format_feedback_for_prompt returns concise output."""
-    print("\n=== Test: Feedback format is concise ===")
+def test_feedback_structured_format():
+    """Test that format_feedback_for_prompt returns structured output with sections."""
+    print("\n=== Test: Feedback format is structured ===")
     
     from feedback_collector import FeedbackCollector
     
@@ -182,53 +184,44 @@ def test_feedback_concise_format():
         
         # Record a policy with many configs
         policy = {
-            "objective_weights": {"R_sm_throughput": 0.5},
+            "objective_weights": {"R_sm_throughput": 0.5, "R_dram_throughput": 0.3, "R_l1_hit_rate": 0.1, "R_l2_hit_rate": 0.1},
             "search_space": {"BLOCK_SIZE_M": [128], "num_stages": [5]}
         }
         best_configs = {
-            1: {"config": {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "num_stages": 3}, "reward": 45.0},
-            16: {"config": {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "num_stages": 4}, "reward": 48.0},
-            64: {"config": {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "num_stages": 4}, "reward": 51.0},
-            256: {"config": {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "num_stages": 5}, "reward": 53.0},
-            1024: {"config": {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "num_stages": 5}, "reward": 55.0},
+            1: {"config": {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "num_warps": 8, "num_stages": 3}, "reward": 45.0},
+            16: {"config": {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64, "num_warps": 16, "num_stages": 4}, "reward": 48.0},
+            64: {"config": {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64, "num_warps": 16, "num_stages": 4}, "reward": 51.0},
+            256: {"config": {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64, "num_warps": 16, "num_stages": 5}, "reward": 53.0},
+            1024: {"config": {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64, "num_warps": 16, "num_stages": 5}, "reward": 55.0},
         }
         collector.record_policy_result(policy, reward=55.0, best_configs=best_configs)
         
         feedback = collector.format_feedback_for_prompt()
         
-        # Check that feedback is concise
-        lines = feedback.strip().split('\n')
-        
-        # Should be less than 15 lines (was 30+ before)
-        if len(lines) <= 15:
-            print(f"  ✓ Feedback is {len(lines)} lines (<=15)")
-        else:
-            print(f"  ✗ Feedback is {len(lines)} lines (>15)")
-            return False
-        
-        # Should only include top 3 configs
-        token_mentions = [line for line in lines if line.strip().startswith('Token')]
-        if len(token_mentions) <= 3:
-            print(f"  ✓ Only {len(token_mentions)} token configs (<=3)")
-        else:
-            print(f"  ✗ {len(token_mentions)} token configs (>3)")
-            return False
-        
-        # Should NOT have verbose sections
-        verbose_patterns = [
-            "=== FEEDBACK FROM PREVIOUS",
-            "=== BEST POLICY WEIGHTS ===",
-            "=== WHAT DIDN'T WORK ===",
-            "=== YOUR TASK ===",
+        # Check that feedback has structured sections
+        checks = [
+            ("FEEDBACK FROM PREVIOUS ITERATIONS" in feedback, "Header section present"),
+            ("Policies Evaluated:" in feedback, "Policies evaluated count"),
+            ("Best Reward Achieved:" in feedback, "Best reward shown"),
+            ("BEST CONFIGURATIONS FOUND:" in feedback, "Best configs section"),
+            ("BEST OBJECTIVE WEIGHTS:" in feedback, "Objective weights section"),
+            ("YOUR GOAL:" in feedback, "Goal statement present"),
         ]
-        for pattern in verbose_patterns:
-            if pattern in feedback:
-                print(f"  ✗ Verbose section found: {pattern}")
-                return False
-        print("  ✓ No verbose sections")
         
-        print("✅ Feedback format is concise")
-        return True
+        all_passed = True
+        for check, name in checks:
+            if check:
+                print(f"  ✓ {name}")
+            else:
+                print(f"  ✗ {name}")
+                all_passed = False
+        
+        if all_passed:
+            print("✅ Feedback format is structured")
+            return True
+        else:
+            print("❌ Feedback format is NOT structured")
+            return False
     finally:
         shutil.rmtree(temp_dir)
 
@@ -295,15 +288,15 @@ if __name__ == "__main__":
     all_passed &= test_max_completion_length()
     all_passed &= test_summarize_ncu_report_exists()
     all_passed &= test_summarize_ncu_report_functionality()
-    all_passed &= test_prompt_uses_chat_template()
-    all_passed &= test_prompt_starts_assistant_with_param()
-    all_passed &= test_prompt_emphasizes_json_only()
+    all_passed &= test_prompt_uses_expert_format()
+    all_passed &= test_prompt_ends_with_param()
+    all_passed &= test_prompt_json_first_format()
     
     print("\n" + "="*60)
     print("=== feedback_collector.py Changes ===")
     print("="*60)
     
-    all_passed &= test_feedback_concise_format()
+    all_passed &= test_feedback_structured_format()
     all_passed &= test_feedback_max_configs_parameter()
     
     print("\n" + "="*60)

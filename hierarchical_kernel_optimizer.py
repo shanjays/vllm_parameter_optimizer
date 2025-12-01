@@ -49,7 +49,7 @@ RUN_SCRIPT_PATH = "run_kernel_benchmark.py"
 EXPLORATION_STEPS = 10            # Increased from 8 for better exploration
 META_LEARNING_STEPS = 4           # Reduced from 50 for 5-hour run
 NUM_GENERATIONS = 4               # Reduced from 8
-MAX_COMPLETION_LENGTH = 256       # Reduced from 1536 to prevent verbose reasoning and truncation
+MAX_COMPLETION_LENGTH = 1536      # Increased to allow JSON-first output with brief reasoning
 
 # vLLM validation settings
 VLLM_NUM_PROMPTS = 40             # Reduced from 100
@@ -122,53 +122,41 @@ def get_initial_profile_data():
 
 
 def summarize_ncu_report(ncu_csv: str) -> str:
-    """
-    Summarize NCU profiling data into key metrics.
-    
-    Extracts and averages key performance metrics from raw NCU CSV data
-    to provide a concise summary for the LLM prompt.
-    
-    Args:
-        ncu_csv: Raw NCU CSV output string
-        
-    Returns:
-        str: Formatted summary of key metrics
-    """
+    """Extract key metrics from NCU CSV data."""
     import re
     
-    # Extract key metrics using regex
-    sm_values = re.findall(r'sm__throughput\.avg\.pct_of_peak_sustained_elapsed[^0-9]*([0-9.]+)', ncu_csv)
-    dram_values = re.findall(r'dram__throughput\.avg\.pct_of_peak_sustained_elapsed[^0-9]*([0-9.]+)', ncu_csv)
-    l1_values = re.findall(r'l1tex__t_sector_hit_rate\.pct[^0-9]*([0-9.]+)', ncu_csv)
-    l2_values = re.findall(r'lts__t_sector_hit_rate\.pct[^0-9]*([0-9.]+)', ncu_csv)
+    metrics = {
+        'sm_throughput': [],
+        'dram_throughput': [],
+        'l1_hit_rate': [],
+        'l2_hit_rate': []
+    }
     
-    def avg(values):
-        if not values:
-            return "N/A"
-        nums = [float(v) for v in values if v]
-        return f"{sum(nums)/len(nums):.1f}%" if nums else "N/A"
+    for match in re.finditer(r'sm__throughput\.avg\.pct_of_peak_sustained_elapsed[^0-9]*([0-9.]+)', ncu_csv):
+        metrics['sm_throughput'].append(float(match.group(1)))
+    for match in re.finditer(r'dram__throughput\.avg\.pct_of_peak_sustained_elapsed[^0-9]*([0-9.]+)', ncu_csv):
+        metrics['dram_throughput'].append(float(match.group(1)))
+    for match in re.finditer(r'l1tex__t_sector_hit_rate\.pct[^0-9]*([0-9.]+)', ncu_csv):
+        metrics['l1_hit_rate'].append(float(match.group(1)))
+    for match in re.finditer(r'lts__t_sector_hit_rate\.pct[^0-9]*([0-9.]+)', ncu_csv):
+        metrics['l2_hit_rate'].append(float(match.group(1)))
     
-    def range_str(values):
-        if not values:
+    def stats(vals):
+        if not vals:
             return "N/A"
-        nums = [float(v) for v in values if v]
-        if not nums:
-            return "N/A"
-        return f"{min(nums):.1f}-{max(nums):.1f}%"
+        return f"min={min(vals):.1f}%, max={max(vals):.1f}%, avg={sum(vals)/len(vals):.1f}%"
     
-    summary = f"""- SM Throughput: {range_str(sm_values)} (avg: {avg(sm_values)})
-- DRAM Throughput: {range_str(dram_values)} (avg: {avg(dram_values)})
-- L1 Hit Rate: {range_str(l1_values)} (avg: {avg(l1_values)})
-- L2 Hit Rate: {range_str(l2_values)} (avg: {avg(l2_values)})"""
-    return summary
+    return f"""SM Throughput: {stats(metrics['sm_throughput'])}
+DRAM Throughput: {stats(metrics['dram_throughput'])}
+L1 Cache Hit Rate: {stats(metrics['l1_hit_rate'])}
+L2 Cache Hit Rate: {stats(metrics['l2_hit_rate'])}"""
 
 
 def build_optimization_prompt(initial_ncu_report, feedback_collector=None):
     """
     Build the optimization prompt with optional feedback from previous iterations.
     
-    Uses chat template format and summarized NCU data to encourage concise JSON output
-    and prevent verbose reasoning that leads to truncation.
+    Uses detailed expert-level prompt to encourage JSON-first output with brief reasoning.
     
     Args:
         initial_ncu_report: Initial NCU profiling data (raw CSV)
@@ -183,36 +171,135 @@ def build_optimization_prompt(initial_ncu_report, feedback_collector=None):
     # Summarize NCU data instead of including raw CSV
     ncu_summary = summarize_ncu_report(initial_ncu_report)
     
-    # Get feedback from previous iterations if available (concise format)
+    # Get feedback from previous iterations if available
     feedback_section = ""
     if feedback_collector:
         feedback_section = feedback_collector.format_feedback_for_prompt()
-        if feedback_section:
-            feedback_section = f"\n{feedback_section}\n"
     
-    # Use chat template format with system message establishing JSON-only role
-    # Start assistant response with <param> to force immediate JSON output
-    optimization_prompt = f"""<|im_start|>system
-You are a JSON policy generator for CUDA kernel optimization. You output ONLY valid JSON inside <param></param> tags. No explanations.<|im_end|>
-<|im_start|>user
-Generate an optimization policy for fused_moe kernel on H100 GPU.
+    optimization_prompt = f'''You are an expert CUDA kernel optimization engineer specializing in NVIDIA GPU architectures and Triton kernel tuning. Your task is to generate an optimal configuration policy for the fused_moe (Mixture of Experts) kernel.
 
-Model: {MODEL_NAME}
-Config: E={STATIC_BENCHMARK_ARGS['num_experts']}, N={STATIC_BENCHMARK_ARGS['inter_size']}, TopK={STATIC_BENCHMARK_ARGS['top_k']}
-Token counts: {token_counts_str}
+═══════════════════════════════════════════════════════════════════════════════
+                              KERNEL DETAILS
+═══════════════════════════════════════════════════════════════════════════════
 
-Baseline performance (from NCU profiling):
+KERNEL: fused_moe_kernel (Triton)
+PURPOSE: Fused Mixture-of-Experts computation combining expert routing, matrix multiplication, and reduction in a single kernel to minimize memory bandwidth.
+
+MODEL CONFIGURATION:
+- Model: {MODEL_NAME}
+- Number of Experts (E): {STATIC_BENCHMARK_ARGS['num_experts']}
+- Intermediate Size (N): {STATIC_BENCHMARK_ARGS['inter_size']}
+- Hidden Size: {STATIC_BENCHMARK_ARGS['hidden_size']}
+- Top-K Experts: {STATIC_BENCHMARK_ARGS['top_k']}
+- Data Type: {STATIC_BENCHMARK_ARGS['dtype']}
+
+TOKEN BATCH SIZES TO OPTIMIZE: {token_counts_str}
+
+═══════════════════════════════════════════════════════════════════════════════
+                              HARDWARE SPECS
+═══════════════════════════════════════════════════════════════════════════════
+
+GPU: NVIDIA H100 80GB HBM3
+- SM Count: 132 Streaming Multiprocessors
+- Shared Memory per SM: 228 KB (232,448 bytes)
+- L2 Cache: 50 MB
+- HBM3 Bandwidth: 3.35 TB/s
+- FP16/BF16 Tensor Core Peak: 1,979 TFLOPS
+
+SHARED MEMORY USAGE FORMULA:
+  shared_mem = (BLOCK_SIZE_M × BLOCK_SIZE_K + BLOCK_SIZE_K × BLOCK_SIZE_N) × 2 × num_stages
+  Must be ≤ 232,448 bytes
+
+═══════════════════════════════════════════════════════════════════════════════
+                           BASELINE PROFILING METRICS
+═══════════════════════════════════════════════════════════════════════════════
+
+Current NCU profiling results:
 {ncu_summary}
+
+Analyze these metrics to determine if the kernel is compute-bound or memory-bound.
+
+═══════════════════════════════════════════════════════════════════════════════
+                           TUNING PARAMETERS
+═══════════════════════════════════════════════════════════════════════════════
+
+You must choose 2-3 values for each parameter:
+
+1. BLOCK_SIZE_M - Tile size in M dimension
+   Valid: [16, 32, 64, 128]
+   Larger = better arithmetic intensity, Smaller = better for small batches
+
+2. BLOCK_SIZE_N - Tile size in N dimension
+   Valid: [32, 64, 128]
+   Larger = better memory coalescing
+
+3. BLOCK_SIZE_K - Tile size in K dimension (reduction)
+   Valid: [32, 64]
+   K=64 better for compute, K=32 for memory-bound
+
+4. num_warps - Warps per thread block
+   Valid: [4, 8, 16]
+   More warps = higher occupancy
+
+5. num_stages - Software pipelining stages
+   Valid: [2, 3, 4, 5]
+   More stages = better latency hiding (limited by shared memory)
+
+═══════════════════════════════════════════════════════════════════════════════
+                           OBJECTIVE WEIGHTS
+═══════════════════════════════════════════════════════════════════════════════
+
+Specify weights for the reward function (must sum to 1.0):
+
+- R_sm_throughput: SM compute efficiency (typical: 0.3-0.5)
+- R_dram_throughput: Memory bandwidth utilization (typical: 0.25-0.4)
+- R_l1_hit_rate: L1 cache efficiency (typical: 0.05-0.15)
+- R_l2_hit_rate: L2 cache efficiency (typical: 0.1-0.2)
 {feedback_section}
-Rules:
-1. Output ONLY <param>{{JSON}}</param> - nothing else
-2. Each search_space array needs 2-3 values
-3. Weights must sum to 1.0
-4. Valid values: BLOCK_SIZE_M/N: [16,32,64,128], BLOCK_SIZE_K: [32,64], num_warps: [4,8,16], num_stages: [2,3,4,5]
-<|im_end|>
-<|im_start|>assistant
+═══════════════════════════════════════════════════════════════════════════════
+                           YOUR TASK
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Analyze the baseline metrics above
+2. Determine if kernel is compute-bound or memory-bound
+3. Choose appropriate objective weights based on your analysis
+4. Select 2-3 promising values for each search_space parameter
+5. Output your policy JSON FIRST, then provide brief reasoning
+
+═══════════════════════════════════════════════════════════════════════════════
+                           OUTPUT FORMAT (IMPORTANT!)
+═══════════════════════════════════════════════════════════════════════════════
+
+You MUST output in this EXACT format:
+1. FIRST: Output your policy JSON inside <param></param> tags
+2. THEN: Provide brief reasoning (2-4 sentences) explaining your choices
+
 <param>
-"""
+{{
+  "objective_weights": {{
+    "R_sm_throughput": <your_value>,
+    "R_dram_throughput": <your_value>,
+    "R_l1_hit_rate": <your_value>,
+    "R_l2_hit_rate": <your_value>
+  }},
+  "search_space": {{
+    "BLOCK_SIZE_M": [<2-3 values>],
+    "BLOCK_SIZE_N": [<2-3 values>],
+    "BLOCK_SIZE_K": [<2 values>],
+    "num_warps": [<2-3 values>],
+    "num_stages": [<2-3 values>]
+  }}
+}}
+</param>
+
+REASONING: <Your brief 2-4 sentence explanation of why you chose these values>
+
+═══════════════════════════════════════════════════════════════════════════════
+
+NOW GENERATE YOUR OPTIMIZED POLICY (JSON first, then reasoning):
+
+<param>
+'''
     return optimization_prompt
 
 
@@ -303,7 +390,7 @@ def main():
         report_to="tensorboard",
         remove_unused_columns=False,
         temperature=0.7,
-        max_prompt_length=2048,
+        max_prompt_length=4096,
         max_completion_length=MAX_COMPLETION_LENGTH,  # Use the configured value
         num_generations=NUM_GENERATIONS,               # Use the configured value
         loss_type="grpo",
