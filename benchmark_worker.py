@@ -287,6 +287,7 @@ class BenchmarkWorker:
         return float(reward)
 
     def run_slow_gym_validation(self, params_dict, model_name, user_goal):
+        """Runs the 'Slow Gym' (vllm bench) on this worker's GPU."""
         try:
             import vllm
         except ImportError:
@@ -322,32 +323,62 @@ class BenchmarkWorker:
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
 
+        # Clear CUDA cache before running to avoid memory conflicts after NCU profiling
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+        # Use more conservative settings to avoid OOM errors
         command = [
             "python", "-m", "vllm.entrypoints.cli.main", "bench", "throughput",
             "--model", model_name,
             "--dataset-path", "ShareGPT_Vicuna_unfiltered.json", 
-            "--num-prompts", "200", 
+            "--num-prompts", "100",  # Reduced from 200
             "--trust-remote-code",
             "--enforce-eager", 
             "--tensor-parallel-size", "1",
-            "--max-model-len", "8192", 
-            "--gpu-memory-utilization", "0.97"
+            "--max-model-len", "4096",  # Reduced from 8192
+            "--gpu-memory-utilization", "0.85",  # Reduced from 0.97
         ]
         
         try:
             print(f"[BenchmarkWorker] Running Slow Gym: {' '.join(command)}")
-            output = subprocess.run(
-                command, env=env, check=True, capture_output=True, text=True, timeout=300
-            ).stdout
+            result = subprocess.run(
+                command, 
+                env=env, 
+                check=True, 
+                capture_output=True, 
+                text=True, 
+                timeout=600  # Increased timeout for model loading
+            )
+            output = result.stdout
             
             metric = self._parse_vllm_bench_output(output, user_goal)
             print(f"[BenchmarkWorker] Slow Gym Result: {metric} tokens/sec")
             
-            os.remove(config_path)
+            # Clean up config file
+            if os.path.exists(config_path):
+                os.remove(config_path)
             return metric
 
+        except subprocess.CalledProcessError as e:
+            print(f"[BenchmarkWorker] ERROR: vllm bench failed. Return code: {e.returncode}")
+            print(f"[BenchmarkWorker] STDERR: {e.stderr[:500] if e.stderr else 'None'}")
+            if os.path.exists(config_path):
+                os.remove(config_path)
+            return 0.0
+            
+        except subprocess.TimeoutExpired:
+            print(f"[BenchmarkWorker] ERROR: vllm bench timed out after 600s")
+            if os.path.exists(config_path):
+                os.remove(config_path)
+            return 0.0
+            
         except Exception as e:
-            print(f"[BenchmarkWorker] ERROR: vllm bench failed on GPU {self.gpu_id}. {e}")
+            print(f"[BenchmarkWorker] ERROR: vllm bench failed with exception: {e}")
             if os.path.exists(config_path):
                 os.remove(config_path)
             return 0.0
