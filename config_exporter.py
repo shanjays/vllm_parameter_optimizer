@@ -16,6 +16,7 @@ Output format matches vLLM's expected config:
 import json
 import os
 from datetime import datetime
+from typing import Dict, Any, Optional
 
 # All token counts that vLLM expects
 TOKEN_COUNTS_ALL = [
@@ -44,7 +45,18 @@ class VLLMConfigExporter:
     # Default output directory for saving configs
     DEFAULT_OUTPUT_DIR = "./optimized_configs"
     
-    def __init__(self, num_experts, inter_size, device_name="NVIDIA_H100_80GB_HBM3"):
+    # Default kernel configuration that works on H100
+    DEFAULT_KERNEL_CONFIG = {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 32,
+        "GROUP_SIZE_M": 8,
+        "num_warps": 8,
+        "num_stages": 4
+    }
+    
+    def __init__(self, num_experts, inter_size, device_name="NVIDIA_H100_80GB_HBM3",
+                 output_dir: str = None):
         """
         Initialize the config saver.
         
@@ -52,21 +64,142 @@ class VLLMConfigExporter:
             num_experts: E value (number of experts in MoE model)
             inter_size: N value (intermediate size)
             device_name: GPU device name for config filename
+            output_dir: Output directory for local config backups
         """
         self.num_experts = num_experts  # E value
         self.inter_size = inter_size    # N value
         self.device_name = device_name
-        self._last_output_dir = self.DEFAULT_OUTPUT_DIR
+        self._last_output_dir = output_dir if output_dir else self.DEFAULT_OUTPUT_DIR
         
         # All token counts that vLLM expects
         self.all_token_counts = TOKEN_COUNTS_ALL
         
         # Best config for each token count
-        self.best_configs = {}
-        self.best_rewards = {}
+        self.best_configs: Dict[str, Dict[str, Any]] = {}
+        self.best_rewards: Dict[str, float] = {}
         
         # All tested configs for analysis
         self.all_results = []
+        
+        # Create output directory
+        os.makedirs(self._last_output_dir, exist_ok=True)
+        
+        # Get vLLM config directory
+        self.vllm_config_dir = self._get_vllm_config_dir()
+        
+        # Config filename that vLLM expects
+        self.config_filename = f"E={num_experts},N={inter_size},device_name={device_name}.json"
+        
+        # Initialize config file with defaults if it doesn't exist
+        self._initialize_config_with_defaults()
+    
+    def _get_vllm_config_dir(self) -> str:
+        """Get the vLLM fused_moe config directory."""
+        try:
+            import vllm
+            vllm_lib_path = os.path.dirname(vllm.__file__)
+            config_dir = os.path.join(
+                vllm_lib_path, 
+                "model_executor/layers/fused_moe/configs/"
+            )
+            os.makedirs(config_dir, exist_ok=True)
+            return config_dir
+        except ImportError:
+            print("[ConfigExporter] vLLM not installed, using local directory")
+            fallback_dir = os.path.join(self._last_output_dir, "vllm_configs")
+            os.makedirs(fallback_dir, exist_ok=True)
+            return fallback_dir
+        except OSError as e:
+            print(f"[ConfigExporter] Could not create vLLM config dir: {e}")
+            fallback_dir = os.path.join(self._last_output_dir, "vllm_configs")
+            os.makedirs(fallback_dir, exist_ok=True)
+            return fallback_dir
+    
+    def _initialize_config_with_defaults(self):
+        """Create config file with default values for all token counts."""
+        config_path = os.path.join(self.vllm_config_dir, self.config_filename)
+        
+        # Check if config already exists
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    existing_config = json.load(f)
+                # Load existing best configs and rewards
+                # Use float('-inf') as sentinel for untested configs
+                for tc_str, config in existing_config.items():
+                    self.best_configs[tc_str] = config
+                    self.best_rewards[tc_str] = float('-inf')
+                print(f"[ConfigExporter] Loaded existing config with {len(existing_config)} token counts from {config_path}")
+                return
+            except (json.JSONDecodeError, ValueError) as e:
+                print(f"[ConfigExporter] Could not parse existing config: {e}, creating new")
+        
+        # Create default config for all token counts
+        # Use float('-inf') as sentinel for untested configs
+        default_config = {}
+        for tc in TOKEN_COUNTS_ALL:
+            default_config[str(tc)] = self.DEFAULT_KERNEL_CONFIG.copy()
+            self.best_configs[str(tc)] = self.DEFAULT_KERNEL_CONFIG.copy()
+            self.best_rewards[str(tc)] = float('-inf')
+        
+        # Write to vLLM config directory
+        try:
+            with open(config_path, 'w') as f:
+                json.dump(default_config, f, indent=2)
+            print(f"[ConfigExporter] Initialized config with defaults at {config_path}")
+        except OSError as e:
+            print(f"[ConfigExporter] Could not write to vLLM dir: {e}")
+            # Fallback to local directory
+            local_path = os.path.join(self._last_output_dir, self.config_filename)
+            with open(local_path, 'w') as f:
+                json.dump(default_config, f, indent=2)
+            print(f"[ConfigExporter] Initialized config at {local_path}")
+        
+        # Also write to local output directory as backup
+        local_path = os.path.join(self._last_output_dir, self.config_filename)
+        try:
+            with open(local_path, 'w') as f:
+                json.dump(default_config, f, indent=2)
+        except OSError as e:
+            print(f"[ConfigExporter] Warning: Could not write local backup: {e}")
+    
+    def _update_config_file(self, token_count: int, config: Dict[str, int]):
+        """Update the config file with new best config for a token count."""
+        config_path = os.path.join(self.vllm_config_dir, self.config_filename)
+        
+        # Load existing config
+        try:
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    full_config = json.load(f)
+            else:
+                full_config = {}
+        except (json.JSONDecodeError, ValueError):
+            full_config = {}
+        
+        # Update with new config for this token count
+        full_config[str(token_count)] = config
+        
+        # Write back
+        try:
+            with open(config_path, 'w') as f:
+                json.dump(full_config, f, indent=2)
+        except OSError as e:
+            print(f"[ConfigExporter] Warning: Could not update vLLM config: {e}")
+        
+        # Also update local backup
+        local_path = os.path.join(self._last_output_dir, self.config_filename)
+        try:
+            if os.path.exists(local_path):
+                with open(local_path, 'r') as f:
+                    local_config = json.load(f)
+            else:
+                local_config = {}
+            local_config[str(token_count)] = config
+            with open(local_path, 'w') as f:
+                json.dump(local_config, f, indent=2)
+        except (json.JSONDecodeError, ValueError, OSError) as e:
+            print(f"[ConfigExporter] Warning: Could not update local config: {e}")
         
     def get_config_filename(self):
         """Generate vLLM config filename."""
@@ -97,8 +230,10 @@ class VLLMConfigExporter:
         })
         
         # Update best if this is better
-        if token_key not in self.best_rewards or reward > self.best_rewards[token_key]:
-            self.best_configs[token_key] = {
+        current_best = self.best_rewards.get(token_key, float('-inf'))
+        
+        if reward > current_best:
+            new_config = {
                 "BLOCK_SIZE_M": config.get("BLOCK_SIZE_M", 64),
                 "BLOCK_SIZE_N": config.get("BLOCK_SIZE_N", 64),
                 "BLOCK_SIZE_K": config.get("BLOCK_SIZE_K", 32),
@@ -106,7 +241,12 @@ class VLLMConfigExporter:
                 "num_warps": config.get("num_warps", 4),
                 "num_stages": config.get("num_stages", 4)
             }
+            self.best_configs[token_key] = new_config
             self.best_rewards[token_key] = reward
+            
+            # Immediately update the config file
+            self._update_config_file(token_count, new_config)
+            
             print(f"[ConfigExporter] New best config for {token_count} tokens: reward={reward:.2f}")
             return True
         return False
@@ -120,6 +260,8 @@ class VLLMConfigExporter:
         - best_configs_detailed.json (with rewards and metrics)
         - all_results.json (complete experiment log)
         
+        Also saves to vLLM config directory if available.
+        
         Args:
             output_dir: Directory to save config files
             
@@ -129,17 +271,32 @@ class VLLMConfigExporter:
         os.makedirs(output_dir, exist_ok=True)
         self._last_output_dir = output_dir  # Track for copy_to_vllm
         
-        # 1. Save in vLLM format (just configs, no rewards)
-        vllm_config = {}
-        for token_key in sorted(self.best_configs.keys(), key=lambda x: int(x)):
-            vllm_config[token_key] = self.best_configs[token_key]
+        # Build config from best configs, using defaults for any missing token counts
+        full_config = {}
+        for tc in TOKEN_COUNTS_ALL:
+            tc_str = str(tc)
+            if tc_str in self.best_configs:
+                full_config[tc_str] = self.best_configs[tc_str]
+            else:
+                # Use default if no best found
+                full_config[tc_str] = self.DEFAULT_KERNEL_CONFIG.copy()
         
-        vllm_path = os.path.join(output_dir, self.get_config_filename())
-        with open(vllm_path, 'w') as f:
-            json.dump(vllm_config, f, indent=2)
-        print(f"[ConfigExporter] Saved vLLM config to: {vllm_path}")
+        # 1. Save to vLLM config directory
+        vllm_config_path = os.path.join(self.vllm_config_dir, self.config_filename)
+        try:
+            with open(vllm_config_path, 'w') as f:
+                json.dump(full_config, f, indent=2)
+            print(f"[ConfigExporter] Saved vLLM config to: {vllm_config_path}")
+        except OSError as e:
+            print(f"[ConfigExporter] Could not write to vLLM dir: {e}")
         
-        # 2. Save detailed config with rewards
+        # 2. Also save to local output directory
+        local_vllm_path = os.path.join(output_dir, self.get_config_filename())
+        with open(local_vllm_path, 'w') as f:
+            json.dump(full_config, f, indent=2)
+        print(f"[ConfigExporter] Saved local config to: {local_vllm_path}")
+        
+        # 3. Save detailed config with rewards
         detailed = {
             "metadata": {
                 "num_experts": self.num_experts,
@@ -161,21 +318,25 @@ class VLLMConfigExporter:
             json.dump(detailed, f, indent=2)
         print(f"[ConfigExporter] Saved detailed config to: {detailed_path}")
         
-        # 3. Save all results for analysis
+        # 4. Save all results for analysis
         all_results_path = os.path.join(output_dir, "all_results.json")
         with open(all_results_path, 'w') as f:
             json.dump(self.all_results, f, indent=2)
         print(f"[ConfigExporter] Saved all results to: {all_results_path}")
         
-        return vllm_path
+        return vllm_config_path
     
     def get_summary(self):
         """Get summary of best configs found."""
+        # Only count token counts that have been actually tested (reward > -inf)
+        tested_token_counts = len([tc for tc, r in self.best_rewards.items() if r > float('-inf')])
         return {
             "total_token_counts": len(self.best_configs),
             "total_experiments": len(self.all_results),
-            "best_rewards": self.best_rewards.copy(),
-            "config_filename": self.get_config_filename()
+            "tested_token_counts": tested_token_counts,
+            "best_rewards": {tc: r for tc, r in self.best_rewards.items() if r > float('-inf')},
+            "config_filename": self.get_config_filename(),
+            "config_path": os.path.join(self.vllm_config_dir, self.config_filename)
         }
     
     def export_visualization_data(self):
