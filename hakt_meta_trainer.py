@@ -250,6 +250,10 @@ The JSON must be parseable by Python's json.loads() with no comments, trailing c
 8. NO comments, NO trailing commas, NO type names like "float" or "int"
 9. All numbers must be concrete values (e.g., 0.5, 64, not "0.5" or "float")
 
+=== IMPORTANT ===
+Keep your reasoning BRIEF. Output the <param> JSON block IMMEDIATELY after minimal analysis.
+Do NOT write lengthy explanations. The JSON output is the ONLY thing that matters.
+
 Analyze the NCU metrics and generate an optimized mission plan for the {KERNEL_TO_TUNE} targeting {MODEL_NAME} on H100:
 """
 
@@ -267,12 +271,12 @@ Analyze the NCU metrics and generate an optimized mission plan for the {KERNEL_T
     def hakt_reward_function_wrapper(completions, **kwargs):
         return reward_fn_object(completions, **kwargs)
 
-    # Optimized GRPOConfig settings for ~65GB VRAM utilization (82% of 80GB)
+    # Optimized GRPOConfig settings for ~60GB VRAM utilization (75% of 80GB)
     # Previous settings only used 14GB (18%) - wasteful for H100 80GB
     grpo_config = GRPOConfig(
         output_dir="hakt_professor_finetune",
-        per_device_train_batch_size=6,  # Increased from 2 for better utilization
-        gradient_accumulation_steps=2,  # Effective batch size = 12
+        per_device_train_batch_size=4,  # Adjusted for ~60GB VRAM target (effective batch = 8)
+        gradient_accumulation_steps=2,  # With batch_size=4, effective batch size = 8
         learning_rate=2e-5,
         num_train_epochs=1,
         max_steps=LLM_TRAIN_STEPS,
