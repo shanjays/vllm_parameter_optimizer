@@ -76,3 +76,4 @@ logs/
 hierarchical_optimizer_finetune/
 hierarchical_optimizer_final/
 optimized_configs/
+visualizations/
