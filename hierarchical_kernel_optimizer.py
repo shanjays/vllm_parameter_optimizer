@@ -197,7 +197,7 @@ Output your policy inside <param></param> tags as JSON:
 2. Secondary: DRAM throughput (weight 0.3-0.4) - memory bandwidth matters
 3. Cache hit rates are less critical for MoE (weight 0.1-0.15 each)
 
-Output ONLY the <param>JSON</param> block. Keep reasoning minimal.
+Output minimal reasoning statergy in 4 lines and the <param>JSON</param> block only. 
 """
     return optimization_prompt
 
@@ -340,6 +340,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
