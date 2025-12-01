@@ -48,12 +48,16 @@ STATIC_ARGS_FOR_HAKT = {
     "num_iters": 1
 }
 
+# Safe parameter space for H100 - removed values that cause Triton shared memory overflow
+# H100 shared memory limit: 227KB (232,448 bytes) per SM
+# Values > 128 for block sizes or num_stages > 4 can exceed this limit
+# Note: BLOCK_SIZE_K is limited to 64 because 128*128 + 128*128 * 2 * 4 = 262KB exceeds limit
 FULL_PARAM_SPACE = {
-    "BLOCK_SIZE_M": [16, 32, 64, 128, 256],
-    "BLOCK_SIZE_N": [32, 64, 128, 256],
-    "BLOCK_SIZE_K": [32, 64, 128, 256],
-    "num_warps": [2, 4, 8],
-    "num_stages": [2, 3, 4, 5]
+    "BLOCK_SIZE_M": [16, 32, 64, 128],  # Removed 256 to avoid shared memory overflow
+    "BLOCK_SIZE_N": [32, 64, 128],       # Removed 256 to avoid shared memory overflow
+    "BLOCK_SIZE_K": [32, 64],            # Removed 128, 256 to avoid shared memory overflow with high M/N
+    "num_warps": [4, 8, 16],             # Removed 2 (too few), added 16 for H100
+    "num_stages": [2, 3, 4]              # Removed 5 (causes register overflow on H100)
 }
 
 def _check_versions_and_env():
@@ -110,9 +114,8 @@ def main():
     # --- THIS IS THE UNSLOTH FIX ---
     # We replace the standard loader with FastLanguageModel
     # This will load the model in 4-bit and fix the OOM error.
-    # Increased max_seq_length to 8192 for better VRAM utilization on H100 80GB
-    # GPU 0 was only using ~18% VRAM, this change helps utilize 60-70GB
-    max_seq_length = 8192
+    # Reduced max_seq_length from 8192 to 2048 to avoid CUDA OOM errors
+    max_seq_length = 2048
     professor_llm, tokenizer = FastLanguageModel.from_pretrained(
         model_name = PROFESSOR_MODEL,
         max_seq_length = max_seq_length,
@@ -125,19 +128,18 @@ def main():
     # --- THIS IS THE UNSLOTH FIX ---
     # We replace prepare_model_for_kbit_training and get_peft_model
     # with Unsloth's single, optimized function.
-    # Increased LoRA rank to 128 (from 64) for more trainable parameters
-    # and better VRAM utilization on H100 80GB
+    # Reduced LoRA rank from 128 to 32 to avoid CUDA OOM errors
     professor_llm = FastLanguageModel.get_peft_model(
         professor_llm,
-        r = 128, # LoRA rank (increased from 64 for more trainable parameters)
+        r = 32,  # LoRA rank (reduced from 128 to save VRAM)
         target_modules = [
             "q_proj", "k_proj", "v_proj", "o_proj",
             "gate_proj", "up_proj", "down_proj",
         ],
-        lora_alpha = 256, # Scaled with rank (was 128)
-        lora_dropout = 0.05,
+        lora_alpha = 64,  # Scaled with rank (reduced from 256)
+        lora_dropout = 0.0,  # Use 0 for Unsloth optimization
         bias = "none",
-        use_gradient_checkpointing = "unsloth", # Unsloth's smart checkpointing
+        use_gradient_checkpointing = "unsloth",  # Unsloth's smart checkpointing
         random_state = 3407,
         task_type = "CAUSAL_LM",
     )
@@ -209,7 +211,7 @@ The JSON must be parseable by Python's json.loads() with no comments, trailing c
 }}
 </param>
 
-=== EXAMPLE VALID OUTPUT (from Mistral 7B E=8 config) ===
+=== EXAMPLE VALID OUTPUT (H100-safe configuration) ===
 <param>
 {{
   "reward_function": {{
@@ -219,23 +221,34 @@ The JSON must be parseable by Python's json.loads() with no comments, trailing c
     "R_l2_hit_rate": 0.1
   }},
   "pruned_action_space": {{
-    "BLOCK_SIZE_M": [16, 64, 128],
+    "BLOCK_SIZE_M": [32, 64, 128],
     "BLOCK_SIZE_N": [32, 64, 128],
-    "BLOCK_SIZE_K": [64, 128, 256],
+    "BLOCK_SIZE_K": [32, 64],
     "num_warps": [4, 8, 16],
-    "num_stages": [3, 4, 5]
+    "num_stages": [2, 3, 4]
   }}
 }}
 </param>
 
+=== CRITICAL HARDWARE CONSTRAINTS ===
+- H100 Shared Memory Limit: 227KB (232,448 bytes) per SM
+- Shared memory usage ≈ (BLOCK_SIZE_M × BLOCK_SIZE_K + BLOCK_SIZE_K × BLOCK_SIZE_N) × 2 × num_stages bytes
+- CONSTRAINT: NEVER use BLOCK_SIZE_M or BLOCK_SIZE_N values > 128
+- CONSTRAINT: NEVER use BLOCK_SIZE_K values > 64 (to avoid overflow with high M/N)
+- CONSTRAINT: NEVER use num_stages > 4
+- SAFE combinations: BLOCK_SIZE_M=64, BLOCK_SIZE_K=64, num_stages=4 → 32KB (OK)
+- UNSAFE combinations: BLOCK_SIZE_M=256, BLOCK_SIZE_K=128, num_stages=4 → 262KB (EXCEEDS LIMIT!)
+
 === RULES ===
 1. reward_function weights should sum to approximately 1.0
 2. Each pruned_action_space list may contain 1 to 3 integers from the PARAMETER SPACE
-3. num_warps values MUST be from [2, 4, 8, 16, 32] (powers of 2)
-4. num_stages values should be positive integers (1-8)
-5. Output ONLY the <param>...</param> block with valid JSON inside
-6. NO comments, NO trailing commas, NO type names like "float" or "int"
-7. All numbers must be concrete values (e.g., 0.5, 64, not "0.5" or "float")
+3. num_warps values MUST be from [4, 8, 16] (powers of 2)
+4. num_stages values should be from [2, 3, 4] (max 4 to avoid register overflow)
+5. BLOCK_SIZE_M, BLOCK_SIZE_N values MUST be ≤ 128
+6. BLOCK_SIZE_K values MUST be ≤ 64
+7. Output ONLY the <param>...</param> block with valid JSON inside
+8. NO comments, NO trailing commas, NO type names like "float" or "int"
+9. All numbers must be concrete values (e.g., 0.5, 64, not "0.5" or "float")
 
 Analyze the NCU metrics and generate an optimized mission plan for the {KERNEL_TO_TUNE} targeting {MODEL_NAME} on H100:
 """
@@ -254,12 +267,12 @@ Analyze the NCU metrics and generate an optimized mission plan for the {KERNEL_T
     def hakt_reward_function_wrapper(completions, **kwargs):
         return reward_fn_object(completions, **kwargs)
 
-    # Increased batch sizes and completion length for better H100 VRAM utilization (60-70GB target)
-    # GPU 0 was underutilized at ~18% VRAM - these settings target 75%+ utilization
+    # Conservative GRPOConfig settings to avoid CUDA OOM errors
+    # Memory budget with these settings: ~55GB (69% of 80GB)
     grpo_config = GRPOConfig(
         output_dir="hakt_professor_finetune",
-        per_device_train_batch_size=16,  # Increased from 8 to 16 for H100 80GB with 4-bit model
-        gradient_accumulation_steps=2,  # Added for effective batch size of 32
+        per_device_train_batch_size=2,  # Reduced from 16 to avoid OOM
+        gradient_accumulation_steps=4,  # Effective batch size = 8
         learning_rate=2e-5,
         num_train_epochs=1,
         max_steps=LLM_TRAIN_STEPS,
@@ -268,9 +281,9 @@ Analyze the NCU metrics and generate an optimized mission plan for the {KERNEL_T
         report_to="tensorboard",
         remove_unused_columns=False,
         temperature=0.7,
-        max_prompt_length=3900,  # Increased from 2048, with buffer for special tokens
-        max_completion_length=4096,  # Increased from 2048 to 4096 for longer reasoning
-        num_generations=8,  # Increased from 4 to 8 for better GRPO exploration
+        max_prompt_length=1536,  # Reduced from 3900 to avoid OOM
+        max_completion_length=512,  # Reduced from 4096 to avoid OOM (key fix!)
+        num_generations=2,  # Reduced from 8 to avoid OOM
         loss_type="grpo",
     )
 
