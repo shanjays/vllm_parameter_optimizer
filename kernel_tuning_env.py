@@ -45,6 +45,10 @@ class KernelTuningEnvironment(gym.Env):
         self.config_exporter = config_exporter
         self.current_token_count = current_token_count or static_args.get('num_tokens', 16088)
         
+        # Best config and reward tracking
+        self.best_config = None
+        self.best_reward = float('-inf')
+        
         # Define the State Space (4 NCU metrics)
         # [sm_throughput, dram_throughput, l1_hit_rate, l2_hit_rate]
         self.observation_space = spaces.Box(
@@ -185,6 +189,11 @@ class KernelTuningEnvironment(gym.Env):
             # reward is already negative (as set by worker or exception handler)
             print(f"[KernelTuningEnv] Config failed (boundary found): {params}, reward={reward}")
         else:
+            # Track best config and reward
+            if reward > self.best_reward:
+                self.best_reward = reward
+                self.best_config = params.copy()
+            
             # Update config exporter with the result if available
             if self.config_exporter is not None:
                 metrics = {
