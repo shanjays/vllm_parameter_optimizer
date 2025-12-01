@@ -1,3 +1,4 @@
+import csv
 import os
 import torch
 from stable_baselines3 import PPO
@@ -199,8 +200,6 @@ class ExplorationAgent:
         Returns:
             Path to the saved CSV file
         """
-        import csv
-        
         if path is None:
             path = os.path.join(self.log_dir, "training_history.csv")
         

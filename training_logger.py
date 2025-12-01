@@ -25,6 +25,13 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 
+# Field type constants for CSV parsing/loading
+INTEGER_FIELDS = ('step', 'token_count', 'BLOCK_SIZE_M', 'BLOCK_SIZE_N', 
+                  'BLOCK_SIZE_K', 'GROUP_SIZE_M', 'num_warps', 'num_stages')
+FLOAT_FIELDS = ('reward', 'cumulative_reward', 'best_reward',
+                'sm_throughput', 'dram_throughput', 'l1_hit_rate', 'l2_hit_rate')
+
+
 class TrainingLogger:
     """
     Structured logging class for RL training metrics.
@@ -317,6 +324,9 @@ class TrainingLogger:
             TrainingLogger instance with loaded entries
         """
         logger = cls(output_dir=os.path.dirname(path) or '.')
+        # Reset cumulative stats before loading
+        logger._cumulative_reward = 0.0
+        logger._best_reward = float('-inf')
         
         with open(path, 'r', newline='') as f:
             reader = csv.DictReader(f)
@@ -326,13 +336,9 @@ class TrainingLogger:
                 for key, value in row.items():
                     if value == '' or value is None:
                         entry[key] = None
-                    elif key in ('step', 'token_count'):
+                    elif key in INTEGER_FIELDS:
                         entry[key] = int(value) if value else None
-                    elif key in ('reward', 'cumulative_reward', 'best_reward',
-                                 'sm_throughput', 'dram_throughput', 
-                                 'l1_hit_rate', 'l2_hit_rate',
-                                 'BLOCK_SIZE_M', 'BLOCK_SIZE_N', 'BLOCK_SIZE_K',
-                                 'GROUP_SIZE_M', 'num_warps', 'num_stages'):
+                    elif key in FLOAT_FIELDS:
                         entry[key] = float(value) if value else None
                     else:
                         entry[key] = value

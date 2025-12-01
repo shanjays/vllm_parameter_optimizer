@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import csv
 import json
 import os
 import sys
@@ -31,6 +32,16 @@ import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend by default
 import matplotlib.pyplot as plt
 import numpy as np
+
+# Import field type constants from training_logger
+try:
+    from training_logger import INTEGER_FIELDS, FLOAT_FIELDS
+except ImportError:
+    # Fallback if training_logger is not available
+    INTEGER_FIELDS = ('step', 'token_count', 'BLOCK_SIZE_M', 'BLOCK_SIZE_N', 
+                      'BLOCK_SIZE_K', 'GROUP_SIZE_M', 'num_warps', 'num_stages')
+    FLOAT_FIELDS = ('reward', 'cumulative_reward', 'best_reward',
+                    'sm_throughput', 'dram_throughput', 'l1_hit_rate', 'l2_hit_rate')
 
 
 def load_tensorboard_scalars(log_dir: str) -> Dict[str, List[Tuple[int, float]]]:
@@ -117,8 +128,6 @@ def load_csv_training_log(csv_path: str) -> List[Dict[str, Any]]:
     Returns:
         List of entry dictionaries
     """
-    import csv
-    
     if not os.path.exists(csv_path):
         print(f"[Visualize] CSV file not found: {csv_path}")
         return []
@@ -132,11 +141,9 @@ def load_csv_training_log(csv_path: str) -> List[Dict[str, Any]]:
                 for key, value in row.items():
                     if value == '' or value is None:
                         entry[key] = None
-                    elif key in ('step', 'token_count'):
+                    elif key in INTEGER_FIELDS:
                         entry[key] = int(value) if value else None
-                    elif key in ('reward', 'cumulative_reward', 'best_reward',
-                                 'sm_throughput', 'dram_throughput', 
-                                 'l1_hit_rate', 'l2_hit_rate'):
+                    elif key in FLOAT_FIELDS:
                         entry[key] = float(value) if value else None
                     else:
                         entry[key] = value
@@ -623,11 +630,9 @@ Output Files:
     
     args = parser.parse_args()
     
-    # Enable interactive display if requested
-    if args.show:
-        matplotlib.use('TkAgg')
-        import matplotlib.pyplot as plt
-        plt.ion()
+    # Note: Backend switching after initial import is unreliable in most environments.
+    # The plots are saved to files regardless, and --show may require TkAgg support.
+    show_plots = args.show
     
     print("=" * 60)
     print("Training Visualization Tool")
@@ -719,9 +724,13 @@ Output Files:
     print(f"Generated {generated} visualization(s) in {args.output_dir}")
     print("=" * 60)
     
-    if args.show:
+    if show_plots:
         print("\nDisplaying plots... (close windows to exit)")
-        plt.show(block=True)
+        try:
+            plt.show(block=True)
+        except Exception as e:
+            print(f"[Visualize] Could not display plots interactively: {e}")
+            print("[Visualize] Plots have been saved to files.")
     
     return 0 if generated > 0 else 1
 
