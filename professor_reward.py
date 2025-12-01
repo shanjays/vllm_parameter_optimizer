@@ -343,6 +343,24 @@ class HAKT_Reward_Function:
         pas["num_stages"]   = _coerce_list(pas.get("num_stages", [4]), 4)
         # Enforce power-of-two warps
         pas["num_warps"] = [w for w in pas["num_warps"] if w in POWER_OF_TWO_WARPS] or [4]
+        
+        # H100 hardware constraint validation - clamp values to safe limits
+        # H100 has 228KB shared memory per SM, we use conservative 227KB (232,448 bytes)
+        # Values > 128 for M/N and > 64 for K can cause Triton shared memory overflow
+        # when combined with high num_stages (e.g., 128*128 + 128*128 * 2 * 4 = 262KB)
+        H100_BLOCK_SIZE_MN_LIMIT = 128
+        H100_BLOCK_SIZE_K_LIMIT = 64  # Lower limit for K to avoid overflow with high M/N
+        H100_NUM_STAGES_LIMIT = 4
+        
+        pas["BLOCK_SIZE_M"] = [min(v, H100_BLOCK_SIZE_MN_LIMIT) for v in pas["BLOCK_SIZE_M"]]
+        pas["BLOCK_SIZE_N"] = [min(v, H100_BLOCK_SIZE_MN_LIMIT) for v in pas["BLOCK_SIZE_N"]]
+        pas["BLOCK_SIZE_K"] = [min(v, H100_BLOCK_SIZE_K_LIMIT) for v in pas["BLOCK_SIZE_K"]]
+        pas["num_stages"] = [min(v, H100_NUM_STAGES_LIMIT) for v in pas["num_stages"]]
+        
+        # Remove duplicates and ensure non-empty lists
+        for key in ["BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "num_stages"]:
+            pas[key] = list(set(pas[key])) or ([64] if "BLOCK" in key else [4])
+        
         return {"reward_function": rf, "pruned_action_space": pas}
 
     def _run_fast_loop(self, mission_plan_path):

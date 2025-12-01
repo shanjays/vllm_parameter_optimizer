@@ -45,6 +45,32 @@ class BenchmarkWorker:
     def get_gpu_id(self):
         return self.gpu_id
 
+    def _validate_triton_config(self, config):
+        """
+        Check if config fits H100 shared memory limit.
+        
+        H100 has 227KB (232,448 bytes) of shared memory per SM.
+        Shared memory usage ≈ (M*K + K*N) * 2 * stages bytes for FP16.
+        
+        Returns True if config is valid, False otherwise.
+        """
+        M = config.get('BLOCK_SIZE_M', 64)
+        N = config.get('BLOCK_SIZE_N', 64)
+        K = config.get('BLOCK_SIZE_K', 32)
+        stages = config.get('num_stages', 4)
+        
+        # FP16 = 2 bytes per element
+        # Shared memory for A tile (M x K) and B tile (K x N)
+        shared_mem = (M * K + K * N) * 2 * stages
+        
+        # H100 has 228KB shared memory per SM, we use conservative 227KB (232,448 bytes)
+        H100_LIMIT = 232448  # bytes (~227KB, conservative limit)
+        if shared_mem > H100_LIMIT:
+            print(f"[BenchmarkWorker] Config exceeds shared memory: {shared_mem} bytes > {H100_LIMIT} bytes")
+            print(f"[BenchmarkWorker] Offending config: BLOCK_SIZE_M={M}, BLOCK_SIZE_N={N}, BLOCK_SIZE_K={K}, num_stages={stages}")
+            return False
+        return True
+
     def run_fast_gym_benchmark(self, params_dict, static_args, reward_weights):
         """
         Runs the 'Fast Gym' (ncu) on this worker's GPU (GPU 1).
@@ -62,6 +88,11 @@ class BenchmarkWorker:
         if num_warps <= 0 or (num_warps & (num_warps - 1)) != 0:
             print(f"[BenchmarkWorker] WARNING: Invalid num_warps={num_warps}, using 4")
             config_to_use['num_warps'] = 4
+        
+        # Validate config fits H100 shared memory before running NCU
+        if not self._validate_triton_config(config_to_use):
+            print(f"[BenchmarkWorker] Returning penalty for invalid config")
+            return None, -100.0, None
             
         with open(self.temp_config_path, "w") as f:
             json.dump(config_to_use, f)
