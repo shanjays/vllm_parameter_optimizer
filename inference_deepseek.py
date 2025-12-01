@@ -22,6 +22,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 
 import numpy as np
@@ -65,6 +66,11 @@ TOKEN_COUNTS_FULL = TOKEN_COUNTS_ALL
 # Exploration parameters
 DEFAULT_EXPLORATION_STEPS = 10
 
+# Fallback initial state values (typical NCU metrics from H100)
+# These are representative values when profiling cannot complete:
+# SM throughput: 32.3%, DRAM throughput: 40.8%, L1 hit rate: 0.05%, L2 hit rate: 69.9%
+FALLBACK_INITIAL_STATE = [32.3, 40.8, 0.05, 69.9]
+
 # Default optimization policy
 DEFAULT_OPTIMIZATION_POLICY = {
     "objective_weights": {
@@ -99,7 +105,8 @@ def load_fine_tuned_llm(llm_path, gpu_id=0):
     if not os.path.exists(llm_path):
         raise FileNotFoundError(f"LLM path not found: {llm_path}")
     
-    # Set GPU for model loading
+    # Save and set GPU for model loading
+    prev_cuda = os.environ.get("CUDA_VISIBLE_DEVICES")
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     
     try:
@@ -159,7 +166,7 @@ NVIDIA H100 80GB HBM3
 === TOKEN COUNTS ===
 {token_counts_str}
 
-{f"=== NCU PROFILING DATA ==={chr(10)}{ncu_report}" if ncu_report else ""}
+{f"=== NCU PROFILING DATA ===\n{ncu_report}" if ncu_report else ""}
 
 === OUTPUT FORMAT ===
 Output your policy inside <param></param> tags as JSON:
@@ -283,7 +290,7 @@ def get_initial_state(profiling_worker, static_args):
         return state
     except Exception as e:
         print(f"[DeepSeekInference] Initial state failed: {e}, using fallback")
-        return np.array([32.3, 40.8, 0.05, 69.9], dtype=np.float32)
+        return np.array(FALLBACK_INITIAL_STATE, dtype=np.float32)
 
 
 def run_exploration_phase(
@@ -377,12 +384,14 @@ def run_exploration_phase(
                 print(f"[DeepSeekInference] Token {token_count}: Best reward = {best_result[2]:.2f}")
             
             # Also check environment's best_config tracking
-            if env.best_config is not None and env.best_reward > results.get(token_count, {}).get('reward', float('-inf')):
-                results[token_count] = {
-                    'config': env.best_config,
-                    'reward': env.best_reward
-                }
-                print(f"[DeepSeekInference] Token {token_count}: Updated from env tracking, reward = {env.best_reward:.2f}")
+            if env.best_config is not None:
+                current_best_reward = results.get(token_count, {}).get('reward', float('-inf'))
+                if env.best_reward > current_best_reward:
+                    results[token_count] = {
+                        'config': env.best_config,
+                        'reward': env.best_reward
+                    }
+                    print(f"[DeepSeekInference] Token {token_count}: Updated from env tracking, reward = {env.best_reward:.2f}")
                 
         finally:
             if agent:
@@ -518,10 +527,15 @@ def main():
     # Generate optimization policy
     policy = generate_optimization_policy(model, tokenizer)
     
-    # Save policy to temp file
-    policy_path = f"/tmp/deepseek_policy_{int(time.time())}.json"
-    with open(policy_path, "w") as f:
+    # Save policy to temp file using tempfile module for cross-platform compatibility
+    with tempfile.NamedTemporaryFile(
+        mode='w', 
+        suffix='.json', 
+        prefix='deepseek_policy_', 
+        delete=False
+    ) as f:
         json.dump(policy, f, indent=2)
+        policy_path = f.name
     print(f"[DeepSeekInference] Optimization policy saved to: {policy_path}")
     
     # Select token counts
