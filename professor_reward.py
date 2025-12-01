@@ -17,6 +17,12 @@ DEFAULT_TOKEN_COUNTS = [
     1536, 2048, 3072, 4096
 ]
 
+# Minimum training steps per token count to ensure meaningful exploration
+MIN_STEPS_PER_TOKEN = 10
+
+# Number of top results to collect per token count
+RESULTS_PER_TOKEN = 3
+
 class HAKT_Reward_Function:
     def __init__(self, user_goal, model_name, fast_loop_steps, worker_gpu_id, static_args, 
                  config_saver=None, token_counts=None):
@@ -377,8 +383,8 @@ class HAKT_Reward_Function:
         """Run fast loop for EACH token count."""
         all_top_results = []
         
-        # Calculate steps per token count (minimum 10 steps)
-        steps_per_token = max(10, self.fast_loop_steps // len(self.token_counts))
+        # Calculate steps per token count
+        steps_per_token = max(MIN_STEPS_PER_TOKEN, self.fast_loop_steps // len(self.token_counts))
         
         for token_count in self.token_counts:
             print(f"[RewardFn] Testing token count: {token_count}")
@@ -401,7 +407,7 @@ class HAKT_Reward_Function:
             try:
                 pilot = FighterPilot(env, log_dir=log_dir, device="cpu") # Force CPU
                 pilot.train_epoch(steps=steps_per_token)
-                top = env.get_top_results(n=3)  # Get top 3 per token count
+                top = env.get_top_results(n=RESULTS_PER_TOKEN)
                 print(f"[RewardFn] Token count {token_count}: Found {len(top)} results.")
                 all_top_results.extend(top)
             # --- END FIX ---

@@ -26,6 +26,9 @@ class VLLMConfigSaver:
     }
     """
     
+    # Default output directory for saving configs
+    DEFAULT_OUTPUT_DIR = "./hakt_configs"
+    
     def __init__(self, num_experts, inter_size, device_name="NVIDIA_H100_80GB_HBM3"):
         """
         Initialize the config saver.
@@ -38,6 +41,7 @@ class VLLMConfigSaver:
         self.num_experts = num_experts  # E value
         self.inter_size = inter_size    # N value
         self.device_name = device_name
+        self._last_output_dir = self.DEFAULT_OUTPUT_DIR
         
         # Best config for each token count
         self.best_configs = {}
@@ -105,6 +109,7 @@ class VLLMConfigSaver:
             str: Path to the saved vLLM config file
         """
         os.makedirs(output_dir, exist_ok=True)
+        self._last_output_dir = output_dir  # Track for copy_to_vllm
         
         # 1. Save in vLLM format (just configs, no rewards)
         vllm_config = {}
@@ -180,7 +185,7 @@ class VLLMConfigSaver:
         if not os.path.exists(vllm_config_dir):
             os.makedirs(vllm_config_dir, exist_ok=True)
         
-        src_path = os.path.join("./hakt_configs", self.get_config_filename())
+        src_path = os.path.join(self._last_output_dir, self.get_config_filename())
         dst_path = os.path.join(vllm_config_dir, self.get_config_filename())
         
         if os.path.exists(src_path):
