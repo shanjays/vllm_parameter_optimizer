@@ -240,14 +240,12 @@ def test_verbose_reasoning_detection():
     with open('meta_controller.py', 'r') as f:
         source = f.read()
     
-    # Check for verbose pattern detection using regex patterns
+    # Check for verbose pattern detection in meta_controller.py
+    # The implementation uses regex patterns like r'^We are', r'^Let me', etc.
     verbose_patterns_check = [
-        (re.search(r"r'\^We are'", source) is not None or 
-         re.search(r"We are", source) is not None, "We are pattern"),
-        (re.search(r"r'\^Let me'", source) is not None or
-         re.search(r"Let.{0,5}me", source) is not None, "Let me pattern"),
-        (re.search(r"r'\^Analyzing'", source) is not None or
-         re.search(r"Analyzing", source) is not None, "Analyzing pattern"),
+        (re.search(r"r'\^We are'", source) is not None, "We are pattern"),
+        (re.search(r"r'\^Let me'", source) is not None, "Let me pattern"),
+        (re.search(r"r'\^Analyzing'", source) is not None, "Analyzing pattern"),
         ("verbose reasoning" in source.lower(), "verbose reasoning warning"),
     ]
     
