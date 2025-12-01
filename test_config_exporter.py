@@ -1,5 +1,5 @@
 """
-Tests for VLLMConfigSaver - vLLM format config export functionality.
+Tests for VLLMConfigExporter - vLLM format config export functionality.
 
 These tests verify:
 1. Config filename generation matches vLLM's expected format
@@ -12,86 +12,86 @@ import json
 import os
 import tempfile
 import shutil
-from config_saver import VLLMConfigSaver
+from config_exporter import VLLMConfigExporter
 
 
 def test_get_config_filename():
     """Test that config filename matches vLLM's expected format."""
-    saver = VLLMConfigSaver(num_experts=128, inter_size=1536, device_name="NVIDIA_H100_80GB_HBM3")
+    exporter = VLLMConfigExporter(num_experts=128, inter_size=1536, device_name="NVIDIA_H100_80GB_HBM3")
     expected = "E=128,N=1536,device_name=NVIDIA_H100_80GB_HBM3.json"
-    assert saver.get_config_filename() == expected, f"Expected {expected}, got {saver.get_config_filename()}"
+    assert exporter.get_config_filename() == expected, f"Expected {expected}, got {exporter.get_config_filename()}"
     print("✅ test_get_config_filename PASSED")
 
 
 def test_get_config_filename_different_values():
     """Test filename generation with different E and N values."""
-    saver = VLLMConfigSaver(num_experts=64, inter_size=768, device_name="NVIDIA_A100")
+    exporter = VLLMConfigExporter(num_experts=64, inter_size=768, device_name="NVIDIA_A100")
     expected = "E=64,N=768,device_name=NVIDIA_A100.json"
-    assert saver.get_config_filename() == expected, f"Expected {expected}, got {saver.get_config_filename()}"
+    assert exporter.get_config_filename() == expected, f"Expected {expected}, got {exporter.get_config_filename()}"
     print("✅ test_get_config_filename_different_values PASSED")
 
 
 def test_update_best_config_new_token_count():
     """Test that a new token count creates a new best config."""
-    saver = VLLMConfigSaver(num_experts=128, inter_size=1536)
+    exporter = VLLMConfigExporter(num_experts=128, inter_size=1536)
     config = {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "num_warps": 4, "num_stages": 4}
     
-    result = saver.update_best_config(token_count=16, config=config, reward=50.0)
+    result = exporter.update_best_config(token_count=16, config=config, reward=50.0)
     
     assert result is True, "Should return True for new best config"
-    assert "16" in saver.best_configs, "Token count 16 should be in best_configs"
-    assert saver.best_rewards["16"] == 50.0, "Reward should be stored"
-    assert len(saver.all_results) == 1, "Should have 1 result logged"
+    assert "16" in exporter.best_configs, "Token count 16 should be in best_configs"
+    assert exporter.best_rewards["16"] == 50.0, "Reward should be stored"
+    assert len(exporter.all_results) == 1, "Should have 1 result logged"
     print("✅ test_update_best_config_new_token_count PASSED")
 
 
 def test_update_best_config_better_reward():
     """Test that a better reward updates the best config."""
-    saver = VLLMConfigSaver(num_experts=128, inter_size=1536)
+    exporter = VLLMConfigExporter(num_experts=128, inter_size=1536)
     config1 = {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "num_warps": 4, "num_stages": 4}
     config2 = {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64, "num_warps": 8, "num_stages": 3}
     
-    saver.update_best_config(token_count=16, config=config1, reward=50.0)
-    result = saver.update_best_config(token_count=16, config=config2, reward=75.0)
+    exporter.update_best_config(token_count=16, config=config1, reward=50.0)
+    result = exporter.update_best_config(token_count=16, config=config2, reward=75.0)
     
     assert result is True, "Should return True for better config"
-    assert saver.best_configs["16"]["BLOCK_SIZE_M"] == 128, "BLOCK_SIZE_M should be updated"
-    assert saver.best_rewards["16"] == 75.0, "Reward should be updated"
-    assert len(saver.all_results) == 2, "Both results should be logged"
+    assert exporter.best_configs["16"]["BLOCK_SIZE_M"] == 128, "BLOCK_SIZE_M should be updated"
+    assert exporter.best_rewards["16"] == 75.0, "Reward should be updated"
+    assert len(exporter.all_results) == 2, "Both results should be logged"
     print("✅ test_update_best_config_better_reward PASSED")
 
 
 def test_update_best_config_worse_reward():
     """Test that a worse reward does not update the best config."""
-    saver = VLLMConfigSaver(num_experts=128, inter_size=1536)
+    exporter = VLLMConfigExporter(num_experts=128, inter_size=1536)
     config1 = {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "num_warps": 4, "num_stages": 4}
     config2 = {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32, "num_warps": 4, "num_stages": 2}
     
-    saver.update_best_config(token_count=16, config=config1, reward=75.0)
-    result = saver.update_best_config(token_count=16, config=config2, reward=50.0)
+    exporter.update_best_config(token_count=16, config=config1, reward=75.0)
+    result = exporter.update_best_config(token_count=16, config=config2, reward=50.0)
     
     assert result is False, "Should return False for worse config"
-    assert saver.best_configs["16"]["BLOCK_SIZE_M"] == 64, "BLOCK_SIZE_M should not change"
-    assert saver.best_rewards["16"] == 75.0, "Reward should not change"
-    assert len(saver.all_results) == 2, "Both results should still be logged"
+    assert exporter.best_configs["16"]["BLOCK_SIZE_M"] == 64, "BLOCK_SIZE_M should not change"
+    assert exporter.best_rewards["16"] == 75.0, "Reward should not change"
+    assert len(exporter.all_results) == 2, "Both results should still be logged"
     print("✅ test_update_best_config_worse_reward PASSED")
 
 
 def test_update_best_config_with_metrics():
     """Test that metrics are stored correctly."""
-    saver = VLLMConfigSaver(num_experts=128, inter_size=1536)
+    exporter = VLLMConfigExporter(num_experts=128, inter_size=1536)
     config = {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "num_warps": 4, "num_stages": 4}
     metrics = {"sm_throughput": 45.5, "dram_throughput": 60.2, "l1_hit_rate": 85.0, "l2_hit_rate": 70.0}
     
-    saver.update_best_config(token_count=16, config=config, reward=50.0, metrics=metrics)
+    exporter.update_best_config(token_count=16, config=config, reward=50.0, metrics=metrics)
     
-    assert saver.all_results[0]["metrics"] == metrics, "Metrics should be stored"
+    assert exporter.all_results[0]["metrics"] == metrics, "Metrics should be stored"
     print("✅ test_update_best_config_with_metrics PASSED")
 
 
 def test_save_vllm_config():
     """Test that vLLM config is saved in correct format."""
-    saver = VLLMConfigSaver(num_experts=128, inter_size=1536)
+    exporter = VLLMConfigExporter(num_experts=128, inter_size=1536)
     
     # Add configs for multiple token counts
     configs = [
@@ -100,12 +100,12 @@ def test_save_vllm_config():
         (128, {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64, "num_warps": 8, "num_stages": 4}, 70.0),
     ]
     for token_count, config, reward in configs:
-        saver.update_best_config(token_count, config, reward)
+        exporter.update_best_config(token_count, config, reward)
     
     # Save to temp directory
     temp_dir = tempfile.mkdtemp()
     try:
-        vllm_path = saver.save_vllm_config(output_dir=temp_dir)
+        vllm_path = exporter.save_vllm_config(output_dir=temp_dir)
         
         # Check vLLM format file exists and has correct structure
         assert os.path.exists(vllm_path), "vLLM config file should exist"
@@ -145,15 +145,15 @@ def test_save_vllm_config():
 
 def test_save_vllm_config_sorted_keys():
     """Test that token counts are sorted numerically in output."""
-    saver = VLLMConfigSaver(num_experts=128, inter_size=1536)
+    exporter = VLLMConfigExporter(num_experts=128, inter_size=1536)
     
     # Add in non-sorted order
     for token_count in [128, 1, 64, 16, 4]:
-        saver.update_best_config(token_count, {"BLOCK_SIZE_M": 64}, reward=50.0)
+        exporter.update_best_config(token_count, {"BLOCK_SIZE_M": 64}, reward=50.0)
     
     temp_dir = tempfile.mkdtemp()
     try:
-        vllm_path = saver.save_vllm_config(output_dir=temp_dir)
+        vllm_path = exporter.save_vllm_config(output_dir=temp_dir)
         with open(vllm_path, 'r') as f:
             vllm_config = json.load(f)
         
@@ -167,13 +167,13 @@ def test_save_vllm_config_sorted_keys():
 
 def test_get_summary():
     """Test that summary returns correct information."""
-    saver = VLLMConfigSaver(num_experts=128, inter_size=1536)
+    exporter = VLLMConfigExporter(num_experts=128, inter_size=1536)
     
-    saver.update_best_config(1, {"BLOCK_SIZE_M": 64}, reward=30.0)
-    saver.update_best_config(16, {"BLOCK_SIZE_M": 64}, reward=50.0)
-    saver.update_best_config(16, {"BLOCK_SIZE_M": 128}, reward=60.0)  # Better config
+    exporter.update_best_config(1, {"BLOCK_SIZE_M": 64}, reward=30.0)
+    exporter.update_best_config(16, {"BLOCK_SIZE_M": 64}, reward=50.0)
+    exporter.update_best_config(16, {"BLOCK_SIZE_M": 128}, reward=60.0)  # Better config
     
-    summary = saver.get_summary()
+    summary = exporter.get_summary()
     
     assert summary["total_token_counts"] == 2, "Should have 2 token counts"
     assert summary["total_experiments"] == 3, "Should have 3 experiments"
@@ -185,13 +185,13 @@ def test_get_summary():
 
 def test_default_config_values():
     """Test that default config values are applied for missing keys."""
-    saver = VLLMConfigSaver(num_experts=128, inter_size=1536)
+    exporter = VLLMConfigExporter(num_experts=128, inter_size=1536)
     
     # Config with missing keys
     incomplete_config = {"BLOCK_SIZE_M": 64}
-    saver.update_best_config(16, incomplete_config, reward=50.0)
+    exporter.update_best_config(16, incomplete_config, reward=50.0)
     
-    saved_config = saver.best_configs["16"]
+    saved_config = exporter.best_configs["16"]
     assert saved_config["BLOCK_SIZE_M"] == 64, "Provided value should be used"
     assert saved_config["BLOCK_SIZE_N"] == 64, "Default should be applied"
     assert saved_config["BLOCK_SIZE_K"] == 32, "Default should be applied"
@@ -203,22 +203,22 @@ def test_default_config_values():
 
 def test_multiple_token_counts():
     """Test handling of many token counts (simulating full run)."""
-    saver = VLLMConfigSaver(num_experts=128, inter_size=1536)
+    exporter = VLLMConfigExporter(num_experts=128, inter_size=1536)
     
     # Simulate vLLM token count values
     token_counts = [1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024]
     
     for tc in token_counts:
         config = {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "num_warps": 4, "num_stages": 4}
-        saver.update_best_config(tc, config, reward=50.0 + tc * 0.01)
+        exporter.update_best_config(tc, config, reward=50.0 + tc * 0.01)
     
-    assert len(saver.best_configs) == len(token_counts), f"Should have {len(token_counts)} configs"
-    assert len(saver.all_results) == len(token_counts), f"Should have {len(token_counts)} results"
+    assert len(exporter.best_configs) == len(token_counts), f"Should have {len(token_counts)} configs"
+    assert len(exporter.all_results) == len(token_counts), f"Should have {len(token_counts)} results"
     print("✅ test_multiple_token_counts PASSED")
 
 
 if __name__ == "__main__":
-    print("--- CONFIG SAVER TESTS ---\n")
+    print("--- CONFIG EXPORTER TESTS ---\n")
     
     print("=== Filename Generation Tests ===")
     test_get_config_filename()
@@ -240,5 +240,5 @@ if __name__ == "__main__":
     test_multiple_token_counts()
     
     print("\n" + "="*60)
-    print("✅ ALL CONFIG SAVER TESTS PASSED")
+    print("✅ ALL CONFIG EXPORTER TESTS PASSED")
     print("="*60)
