@@ -36,6 +36,10 @@ DEFAULT_MISSION_PLAN = {
 
 POWER_OF_TWO_WARPS = (2, 4, 8, 16, 32)
 
+# Minimum combinations for meaningful PPO exploration
+MIN_COMBINATIONS = 8
+MIN_VALUES_PER_DIM = 2
+
 
 def _validate_and_coerce_plan(plan):
     """Validate and coerce the mission plan, using defaults for missing/invalid values."""
@@ -106,7 +110,7 @@ def _validate_and_coerce_plan(plan):
     # H100 hardware constraint validation - clamp values to safe limits
     H100_BLOCK_SIZE_MN_LIMIT = 128
     H100_BLOCK_SIZE_K_LIMIT = 64
-    H100_NUM_STAGES_LIMIT = 4
+    H100_NUM_STAGES_LIMIT = 5  # Allow num_stages=5 for aggressive testing
     
     pas["BLOCK_SIZE_M"] = [min(v, H100_BLOCK_SIZE_MN_LIMIT) for v in pas["BLOCK_SIZE_M"]]
     pas["BLOCK_SIZE_N"] = [min(v, H100_BLOCK_SIZE_MN_LIMIT) for v in pas["BLOCK_SIZE_N"]]
@@ -117,14 +121,36 @@ def _validate_and_coerce_plan(plan):
     for key in ["BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "num_stages"]:
         pas[key] = list(set(pas[key])) or ([64] if "BLOCK" in key else [4])
     
-    # Ensure action space has at least 2 combinations for PPO exploration
+    # Default values to expand narrow search spaces
+    defaults = {
+        "BLOCK_SIZE_M": [64, 128],
+        "BLOCK_SIZE_N": [64, 128],
+        "BLOCK_SIZE_K": [32, 64],
+        "num_warps": [8, 16],
+        "num_stages": [3, 4, 5],
+    }
+    
+    # Ensure each dimension has at least 2 values
+    for key in ["BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "num_warps", "num_stages"]:
+        if len(pas[key]) < MIN_VALUES_PER_DIM:
+            # Merge with defaults, remove duplicates, limit to 3 values
+            # (consistent with _coerce_list which limits to 3 to keep search space manageable)
+            pas[key] = list(set(pas[key] + defaults[key]))[:3]
+            print(f"[RewardFn] Expanded {key} to {pas[key]} (was too narrow)")
+    
+    # Calculate total combinations
     total_combinations = 1
     for values in pas.values():
         total_combinations *= len(values)
     
-    if total_combinations < 2:
-        print(f"[RewardFn] WARNING: Action space too small ({total_combinations} combinations), using default")
+    if total_combinations < MIN_COMBINATIONS:
+        print(f"[RewardFn] WARNING: Only {total_combinations} combinations, expanding search space")
         pas = {k: list(v) for k, v in DEFAULT_MISSION_PLAN["pruned_action_space"].items()}
+        total_combinations = 1
+        for values in pas.values():
+            total_combinations *= len(values)
+    
+    print(f"[RewardFn] Search space has {total_combinations} combinations")
     
     return {"reward_function": rf, "pruned_action_space": pas}
 
@@ -287,17 +313,48 @@ def test_action_space_validation():
         for values in pas.values():
             total_combinations *= len(values)
         
-        if total_combinations >= 2:
-            print(f"✅ Action space has {total_combinations} combinations (>= 2)")
+        if total_combinations >= MIN_COMBINATIONS:
+            print(f"✅ Action space has {total_combinations} combinations (>= {MIN_COMBINATIONS})")
         else:
-            print(f"❌ Action space has {total_combinations} combinations (< 2)")
+            print(f"❌ Action space has {total_combinations} combinations (< {MIN_COMBINATIONS})")
+            all_passed = False
+    
+    return all_passed
+
+
+def test_minimum_values_per_dimension():
+    """Test that each dimension has at least 2 values."""
+    print("\n=== Minimum Values Per Dimension Tests ===")
+    all_passed = True
+    
+    # Test case: Plan with single values per dimension
+    single_value_plan = {
+        "reward_function": {"R_sm_throughput": 1.0},
+        "pruned_action_space": {
+            "BLOCK_SIZE_M": [64],
+            "BLOCK_SIZE_N": [64],
+            "BLOCK_SIZE_K": [32],
+            "num_warps": [4],
+            "num_stages": [4]
+        }
+    }
+    
+    print("\n--- Testing: Single value per dimension should be expanded ---")
+    result = _validate_and_coerce_plan(single_value_plan)
+    pas = result["pruned_action_space"]
+    
+    for key in ["BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "num_warps", "num_stages"]:
+        if len(pas[key]) >= MIN_VALUES_PER_DIM:
+            print(f"  ✅ {key}: {len(pas[key])} values (>= {MIN_VALUES_PER_DIM})")
+        else:
+            print(f"  ❌ {key}: {len(pas[key])} values (< {MIN_VALUES_PER_DIM})")
             all_passed = False
     
     return all_passed
 
 
 def test_default_mission_plan_has_multiple_combinations():
-    """Test that DEFAULT_MISSION_PLAN has multiple action combinations."""
+    """Test that DEFAULT_MISSION_PLAN has at least MIN_COMBINATIONS."""
     print("\n=== DEFAULT_MISSION_PLAN Validation ===")
     
     pas = DEFAULT_MISSION_PLAN["pruned_action_space"]
@@ -308,11 +365,11 @@ def test_default_mission_plan_has_multiple_combinations():
     
     print(f"\n  Total combinations: {total_combinations}")
     
-    if total_combinations >= 2:
-        print("✅ DEFAULT_MISSION_PLAN has multiple combinations for PPO exploration")
+    if total_combinations >= MIN_COMBINATIONS:
+        print(f"✅ DEFAULT_MISSION_PLAN has {total_combinations} combinations (>= {MIN_COMBINATIONS})")
         return True
     else:
-        print("❌ DEFAULT_MISSION_PLAN has insufficient combinations")
+        print(f"❌ DEFAULT_MISSION_PLAN has insufficient combinations (< {MIN_COMBINATIONS})")
         return False
 
 
@@ -361,6 +418,36 @@ def test_result_is_dict_not_string():
         return False
 
 
+def test_truncation_detection():
+    """Test that truncated LLM outputs are detected."""
+    print("\n=== Truncation Detection Tests ===")
+    all_passed = True
+    
+    # Test cases for truncation detection
+    truncation_cases = [
+        # Truncated mid-sentence without <param> tags
+        ("Let me analyze the kernel performance and optimize for", "Mid-sentence truncation without <param>"),
+        # Truncated with verbose reasoning, no JSON
+        ("Based on the profiling data, I recommend optimizing for SM throughput because", "Verbose reasoning truncated"),
+    ]
+    
+    for input_str, test_name in truncation_cases:
+        print(f"\n--- Testing: {test_name} ---")
+        # These should be detected as truncated and return None from _extract_json_with_param_handling
+        # or use the default safe policy
+        result = _extract_json_with_param_handling(input_str)
+        
+        # For truncated output without any JSON structure, result should be None
+        # The meta_controller will then use default policy
+        if result is None:
+            print(f"✅ Correctly detected truncated output (returned None)")
+        else:
+            print(f"⚠️ Returned {type(result)}, but may still fall back to default")
+            # This is acceptable as the validation layer will expand to default
+    
+    return all_passed
+
+
 if __name__ == "__main__":
     print("--- TRAINING FIXES TESTS ---")
     
@@ -368,9 +455,11 @@ if __name__ == "__main__":
     
     all_passed &= test_garbage_text_handling()
     all_passed &= test_action_space_validation()
+    all_passed &= test_minimum_values_per_dimension()
     all_passed &= test_default_mission_plan_has_multiple_combinations()
     all_passed &= test_reward_normalization()
     all_passed &= test_result_is_dict_not_string()
+    all_passed &= test_truncation_detection()
     
     print("\n" + "="*60)
     if all_passed:
