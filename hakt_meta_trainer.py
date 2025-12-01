@@ -49,14 +49,14 @@ STATIC_ARGS_FOR_HAKT = {
 }
 
 # Safe parameter space for H100 - removed values that cause Triton shared memory overflow
-# H100 shared memory limit: 227KB (232,448 bytes) per SM
+# H100 has 228KB shared memory per SM, we use conservative 227KB (232,448 bytes) limit
 # Values > 128 for block sizes or num_stages > 4 can exceed this limit
 # Note: BLOCK_SIZE_K is limited to 64 because 128*128 + 128*128 * 2 * 4 = 262KB exceeds limit
 FULL_PARAM_SPACE = {
     "BLOCK_SIZE_M": [16, 32, 64, 128],  # Removed 256 to avoid shared memory overflow
     "BLOCK_SIZE_N": [32, 64, 128],       # Removed 256 to avoid shared memory overflow
     "BLOCK_SIZE_K": [32, 64],            # Removed 128, 256 to avoid shared memory overflow with high M/N
-    "num_warps": [4, 8, 16],             # Removed 2 (too few), added 16 for H100
+    "num_warps": [4, 8, 16],             # Safe subset of powers of 2 for H100
     "num_stages": [2, 3, 4]              # Removed 5 (causes register overflow on H100)
 }
 

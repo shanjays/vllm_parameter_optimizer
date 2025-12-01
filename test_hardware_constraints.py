@@ -9,7 +9,9 @@ These tests verify:
 """
 
 # H100 hardware limits
-H100_SHARED_MEM_LIMIT = 232448  # bytes (227KB)
+# Note: H100 has 228KB (233,472 bytes) shared memory per SM, but we use a conservative
+# limit of 227KB (232,448 bytes) to account for register spillover and other overheads
+H100_SHARED_MEM_LIMIT = 232448  # bytes (~227KB, conservative limit)
 H100_BLOCK_SIZE_MN_LIMIT = 128
 H100_BLOCK_SIZE_K_LIMIT = 64  # Lower limit for K to avoid overflow with high M/N
 H100_NUM_STAGES_LIMIT = 4
@@ -38,14 +40,14 @@ def clamp_block_sizes(pas):
     Clamp block sizes and num_stages to H100-safe values.
     Copied from professor_reward.py for testing.
     """
-    pas["BLOCK_SIZE_M"] = [min(v, H100_BLOCK_SIZE_MN_LIMIT) for v in pas.get("BLOCK_SIZE_M", [64])]
-    pas["BLOCK_SIZE_N"] = [min(v, H100_BLOCK_SIZE_MN_LIMIT) for v in pas.get("BLOCK_SIZE_N", [64])]
-    pas["BLOCK_SIZE_K"] = [min(v, H100_BLOCK_SIZE_K_LIMIT) for v in pas.get("BLOCK_SIZE_K", [32])]
-    pas["num_stages"] = [min(v, H100_NUM_STAGES_LIMIT) for v in pas.get("num_stages", [4])]
+    pas["BLOCK_SIZE_M"] = [min(v, H100_BLOCK_SIZE_MN_LIMIT) for v in pas.get("BLOCK_SIZE_M", [H100_BLOCK_SIZE_MN_LIMIT])]
+    pas["BLOCK_SIZE_N"] = [min(v, H100_BLOCK_SIZE_MN_LIMIT) for v in pas.get("BLOCK_SIZE_N", [H100_BLOCK_SIZE_MN_LIMIT])]
+    pas["BLOCK_SIZE_K"] = [min(v, H100_BLOCK_SIZE_K_LIMIT) for v in pas.get("BLOCK_SIZE_K", [H100_BLOCK_SIZE_K_LIMIT])]
+    pas["num_stages"] = [min(v, H100_NUM_STAGES_LIMIT) for v in pas.get("num_stages", [H100_NUM_STAGES_LIMIT])]
     
     # Remove duplicates
     for key in ["BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "num_stages"]:
-        pas[key] = list(set(pas[key])) or ([64] if "BLOCK" in key else [4])
+        pas[key] = list(set(pas[key])) or ([H100_BLOCK_SIZE_MN_LIMIT] if "BLOCK" in key else [H100_NUM_STAGES_LIMIT])
     
     return pas
 
@@ -146,8 +148,12 @@ def test_clamp_removes_duplicates():
     result = clamp_block_sizes(pas)
     
     # [256, 256, 128] -> [128, 128, 128] -> [128] after dedup
-    assert len(result["BLOCK_SIZE_M"]) == 1 or all(v == 128 for v in result["BLOCK_SIZE_M"]), \
-        f"Duplicates should be removed: {result['BLOCK_SIZE_M']}"
+    assert result["BLOCK_SIZE_M"] == [128], \
+        f"Duplicates should be removed, expected [128], got: {result['BLOCK_SIZE_M']}"
+    
+    # [5, 5, 4] -> [4, 4, 4] -> [4] after dedup
+    assert result["num_stages"] == [4], \
+        f"Duplicates should be removed, expected [4], got: {result['num_stages']}"
     
     print("✅ test_clamp_removes_duplicates PASSED")
 

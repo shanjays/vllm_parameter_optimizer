@@ -63,7 +63,8 @@ class BenchmarkWorker:
         # Shared memory for A tile (M x K) and B tile (K x N)
         shared_mem = (M * K + K * N) * 2 * stages
         
-        H100_LIMIT = 232448  # bytes (227KB)
+        # H100 has 228KB shared memory per SM, we use conservative 227KB (232,448 bytes)
+        H100_LIMIT = 232448  # bytes (~227KB, conservative limit)
         if shared_mem > H100_LIMIT:
             print(f"[BenchmarkWorker] Config exceeds shared memory: {shared_mem} bytes > {H100_LIMIT} bytes")
             print(f"[BenchmarkWorker] Offending config: BLOCK_SIZE_M={M}, BLOCK_SIZE_N={N}, BLOCK_SIZE_K={K}, num_stages={stages}")

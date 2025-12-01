@@ -345,7 +345,7 @@ class HAKT_Reward_Function:
         pas["num_warps"] = [w for w in pas["num_warps"] if w in POWER_OF_TWO_WARPS] or [4]
         
         # H100 hardware constraint validation - clamp values to safe limits
-        # H100 shared memory limit: 227KB (232,448 bytes) per SM
+        # H100 has 228KB shared memory per SM, we use conservative 227KB (232,448 bytes)
         # Values > 128 for M/N and > 64 for K can cause Triton shared memory overflow
         # when combined with high num_stages (e.g., 128*128 + 128*128 * 2 * 4 = 262KB)
         H100_BLOCK_SIZE_MN_LIMIT = 128
