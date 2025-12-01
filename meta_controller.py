@@ -64,7 +64,7 @@ class MetaControllerReward:
     with the low-level configuration exploration (PPO agent).
     """
     def __init__(self, user_goal, model_name, exploration_steps, profiling_gpu_id, static_args, 
-                 config_exporter=None, token_counts=None):
+                 config_exporter=None, token_counts=None, training_logger=None):
         """
         Initialize the meta-controller reward function.
         
@@ -76,6 +76,7 @@ class MetaControllerReward:
             static_args: Static benchmark arguments
             config_exporter: Optional VLLMConfigExporter for saving configs
             token_counts: List of token counts to test
+            training_logger: Optional HierarchicalTrainingLogger for TensorBoard logging
         """
         self.user_goal = user_goal
         self.model_name = model_name
@@ -83,6 +84,7 @@ class MetaControllerReward:
         self.static_args = static_args
         self.config_exporter = config_exporter
         self.token_counts = token_counts or DEFAULT_TOKEN_COUNTS
+        self.training_logger = training_logger
         self.num_experts = static_args.get('num_experts', 128)
         self.inter_size = static_args.get('inter_size', 1536)
         
@@ -584,6 +586,7 @@ class MetaControllerReward:
         """Run exploration phase for EACH token count."""
         all_top_results = []
         best_configs_for_validation = []
+        best_configs = {}
         total_tokens = len(self.token_counts)
         
         # Calculate steps per token count
@@ -600,19 +603,49 @@ class MetaControllerReward:
                 config_exporter=self.config_exporter,
                 current_token_count=token_count
             )
-            log_dir = f"./logs/exploration_{int(time.time())}_tokens{token_count}/"
+            # Use persistent log_dir for each token count (not timestamped)
+            log_dir = f"./logs/exploration_agent/tokens_{token_count}/"
             prev_cuda = os.environ.get("CUDA_VISIBLE_DEVICES")
             
             # Hide GPUs for SB3 MLP – force CPU
             os.environ["CUDA_VISIBLE_DEVICES"] = "" 
             agent = None
             try:
-                agent = ExplorationAgent(env, log_dir=log_dir, device="cpu")
+                # Create agent WITH loading existing model - THIS IS THE FIX!
+                agent = ExplorationAgent(
+                    env, 
+                    log_dir=log_dir, 
+                    device="cpu",
+                    load_existing=True,  # Load trained model if exists!
+                    training_logger=self.training_logger,
+                )
                 agent.train_epoch(steps=steps_per_token)
                 top = env.get_top_results(n=RESULTS_PER_TOKEN)
                 print(f"[MetaController] Token count {token_count}: Found {len(top)} results.")
                 all_top_results.extend(top)
                 best_configs_for_validation.extend(top)
+                
+                # Get best config from environment and save best model if improved
+                if top:
+                    best_result = max(top, key=lambda x: x[2])
+                    best_config = best_result[0]
+                    best_reward = best_result[2]
+                    
+                    best_configs[token_count] = {
+                        'config': best_config,
+                        'reward': best_reward,
+                    }
+                    
+                    # Save best model if this is the best reward so far
+                    agent.save_best_if_improved(best_reward)
+                    
+                    # Update config exporter
+                    if self.config_exporter:
+                        self.config_exporter.update_best_config(
+                            token_count=token_count,
+                            config=best_config,
+                            reward=best_reward,
+                        )
             finally:
                 if agent:
                     try: agent.close()
