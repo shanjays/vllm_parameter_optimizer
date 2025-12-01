@@ -64,7 +64,7 @@ class MetaControllerReward:
     with the low-level configuration exploration (PPO agent).
     """
     def __init__(self, user_goal, model_name, exploration_steps, profiling_gpu_id, static_args, 
-                 config_exporter=None, token_counts=None, training_logger=None):
+                 config_exporter=None, token_counts=None, training_logger=None, feedback_collector=None):
         """
         Initialize the meta-controller reward function.
         
@@ -77,6 +77,7 @@ class MetaControllerReward:
             config_exporter: Optional VLLMConfigExporter for saving configs
             token_counts: List of token counts to test
             training_logger: Optional HierarchicalTrainingLogger for TensorBoard logging
+            feedback_collector: Optional FeedbackCollector for contextual learning feedback
         """
         self.user_goal = user_goal
         self.model_name = model_name
@@ -85,6 +86,7 @@ class MetaControllerReward:
         self.config_exporter = config_exporter
         self.token_counts = token_counts or DEFAULT_TOKEN_COUNTS
         self.training_logger = training_logger
+        self.feedback_collector = feedback_collector
         self.num_experts = static_args.get('num_experts', 128)
         self.inter_size = static_args.get('inter_size', 1536)
         
@@ -145,6 +147,8 @@ class MetaControllerReward:
             print(f"[MetaController] DEBUG: Raw LLM Output:\n{policy_str}\n")
 
             valid = True
+            policy = None
+            best_configs = {}
             try:
                 policy = self._extract_json(policy_str)
                 policy = self._clean_non_json_types(policy)
@@ -155,10 +159,19 @@ class MetaControllerReward:
                     json.dump(policy, f, indent=2)
 
                 print(f"[MetaController] Starting exploration phase ({self.exploration_steps} steps)...")
-                top_configs = self._run_exploration_phase(path)
+                top_configs, best_configs = self._run_exploration_phase(path)
                 print(f"[MetaController] Starting throughput validation (Top {len(top_configs)} configs)...")
                 final_metric = self._run_throughput_validation(top_configs)
                 rewards.append(final_metric)
+                
+                # Record policy result to feedback collector
+                if self.feedback_collector and policy:
+                    self.feedback_collector.record_policy_result(
+                        policy=policy,
+                        reward=final_metric,
+                        best_configs=best_configs
+                    )
+                
                 os.remove(path)
             except Exception as e:
                 valid = False
@@ -583,7 +596,13 @@ class MetaControllerReward:
         return self._validate_and_coerce_policy(plan)
 
     def _run_exploration_phase(self, policy_config_path):
-        """Run exploration phase for EACH token count."""
+        """Run exploration phase for EACH token count.
+        
+        Returns:
+            Tuple of (top_configs, best_configs) where:
+            - top_configs: List of top configuration results
+            - best_configs: Dict mapping token_count -> {config, reward}
+        """
         all_top_results = []
         best_configs_for_validation = []
         best_configs = {}
@@ -664,16 +683,17 @@ class MetaControllerReward:
                 print(f"[MetaController] Periodic validation throughput: {throughput} tokens/sec")
                 best_configs_for_validation = []
         
-        # Return combined top results from all token counts
+        # Return combined top results from all token counts along with best_configs
         if all_top_results:
             sorted_results = sorted(all_top_results, key=lambda x: x[2], reverse=True)
             print(f"[MetaController] Exploration phase completed. Total {len(all_top_results)} results across {len(self.token_counts)} token counts.")
-            return sorted_results[:5]
-        return []
+            return sorted_results[:5], best_configs
+        return [], best_configs
 
     def _run_fast_loop(self, mission_plan_path):
         """Legacy method for backward compatibility."""
-        return self._run_exploration_phase(mission_plan_path)
+        top_configs, _ = self._run_exploration_phase(mission_plan_path)
+        return top_configs
 
     def _run_throughput_validation(self, top_configs):
         """Run throughput validation on the best configurations."""
