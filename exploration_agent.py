@@ -38,14 +38,15 @@ class ExplorationAgent:
         # CRITICAL: Use small n_steps for NCU-based environments
         # Each step takes ~30 seconds (NCU profiler), so we need tiny buffers
         # Default n_steps=2048 would take 17+ hours to fill!
+        # Optimized for 5-hour aggressive training: n_steps=6, batch_size=6
         self.model = PPO(
             "MlpPolicy",
             self.env,
             verbose=1,
             tensorboard_log=self.log_dir,
             device=device,
-            n_steps=4,        # Collect only 4 samples before update (was 2048!)
-            batch_size=4,     # Match batch size to n_steps
+            n_steps=6,        # Collect 6 samples before update (optimized for 5-hour run)
+            batch_size=6,     # Match batch size to n_steps
             n_epochs=2,       # Only 2 epochs per update (was 10)
             learning_rate=3e-4,
             gamma=0.99,

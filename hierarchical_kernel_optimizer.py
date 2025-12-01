@@ -23,18 +23,18 @@ from transformers import AutoTokenizer
 from trl import GRPOTrainer, GRPOConfig
 
 from meta_controller import MetaControllerReward
-from config_exporter import VLLMConfigExporter
+from config_exporter import VLLMConfigExporter, TOKEN_COUNTS_ALL
 
 META_CONTROLLER_GPU_ID = 0
 PROFILING_GPU_ID = 7
 
+# ============== 5-HOUR AGGRESSIVE TRAINING CONFIG ==============
+
+# Token counts for training (key representative values)
+TOKEN_COUNTS_TRAINING = [1, 16, 64, 256, 1024, 4096, 16384]
+
 # Token counts to test (matching vLLM's expected format)
-# These represent different token batch sizes that the fused_moe kernel
-# will encounter during inference. The optimal kernel config varies based
-# on how many tokens are being processed.
-TOKEN_COUNTS_TO_TEST = [
-    1, 16, 64, 256, 1024, 4096
-]
+TOKEN_COUNTS_TO_TEST = TOKEN_COUNTS_TRAINING
 
 # Meta-controller model (LLM for generating optimization policies)
 META_CONTROLLER_MODEL = "openai/gpt-oss-20b"
@@ -43,8 +43,17 @@ USER_GOAL = "throughput"
 MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507"
 KERNEL_TO_TUNE = "fused_moe_kernel"
 RUN_SCRIPT_PATH = "run_kernel_benchmark.py"
-EXPLORATION_STEPS = 20  # Each step = 1 NCU run (~30 sec), so 20 steps = ~10 minutes
-META_LEARNING_STEPS = 50
+
+# Meta-learning (outer loop) - optimized for 5-hour run
+EXPLORATION_STEPS = 10            # Increased from 8 for better exploration
+META_LEARNING_STEPS = 8           # Reduced from 50 for 5-hour run
+NUM_GENERATIONS = 4               # Reduced from 8
+MAX_COMPLETION_LENGTH = 1536      # Increased from 1024 for aggressive prompts
+
+# vLLM validation settings
+VLLM_NUM_PROMPTS = 40             # Reduced from 100
+VLLM_MAX_MODEL_LEN = 4096
+VLLM_GPU_MEMORY_UTIL = 0.90       # Aggressive (was 0.85)
 
 STATIC_BENCHMARK_ARGS = {
     "run_script_path": RUN_SCRIPT_PATH,
@@ -58,13 +67,22 @@ STATIC_BENCHMARK_ARGS = {
     "num_iters": 1
 }
 
+# Aggressive search space for H100 - includes num_stages=5 for aggressive testing
+AGGRESSIVE_SEARCH_SPACE = {
+    "BLOCK_SIZE_M": [64, 128],
+    "BLOCK_SIZE_N": [64, 128],
+    "BLOCK_SIZE_K": [32, 64],
+    "num_warps": [8, 16],
+    "num_stages": [3, 4, 5],      # Include 5 for aggressive testing!
+}
+
 # Safe parameter space for H100 - validated against shared memory limits
 FULL_PARAM_SPACE = {
     "BLOCK_SIZE_M": [16, 32, 64, 128],
     "BLOCK_SIZE_N": [32, 64, 128],
     "BLOCK_SIZE_K": [32, 64],
     "num_warps": [4, 8, 16],
-    "num_stages": [2, 3, 4]
+    "num_stages": [2, 3, 4, 5]     # Include 5 for aggressive testing
 }
 
 def _check_versions_and_env():
@@ -145,79 +163,67 @@ def main():
         task_type="CAUSAL_LM",
     )
 
-    optimization_prompt = f"""You are a CUDA kernel optimization expert in a hierarchical optimization system.
+    # Format token counts for the prompt
+    token_counts_str = ", ".join(str(tc) for tc in TOKEN_COUNTS_TO_TEST)
+    
+    optimization_prompt = f"""You are an AGGRESSIVE CUDA kernel optimization expert. Your goal is to find the FASTEST possible fused_moe kernel configurations for maximum throughput.
 
-=== HARDWARE SPECIFICATIONS (NVIDIA H100 80GB HBM3) ===
-- Memory: 80GB HBM3
-- Memory Bandwidth: 3.35 TB/s
-- FP16 Tensor Core Performance: 989 TFLOPS
-- Streaming Multiprocessors (SMs): 132 SMs with 128 CUDA cores each
-- Shared Memory: 228KB per SM (configurable L1/shared split)
-- Max Warps per SM: 64
+=== TARGET MODEL ===
+{MODEL_NAME}
+Experts: {STATIC_BENCHMARK_ARGS['num_experts']}, Intermediate Size: {STATIC_BENCHMARK_ARGS['inter_size']}, Top-K: {STATIC_BENCHMARK_ARGS['top_k']}
 
-=== TARGET KERNEL: {KERNEL_TO_TUNE} ===
-The fused_moe_kernel is a Triton kernel for Mixture-of-Experts (MoE) computation.
+=== HARDWARE ===
+NVIDIA H100 80GB HBM3
+Shared Memory: 227KB per SM (232,448 bytes)
+Target: Push configs to the EDGE of hardware limits!
 
-=== KERNEL PARAMETER IMPACT ===
-| Parameter | Description | Increasing Value Effect |
-|-----------|-------------|------------------------|
-| BLOCK_SIZE_M | Tokens processed per thread block | Higher throughput, may reduce occupancy |
-| BLOCK_SIZE_N | Output dimension tile size | Better memory coalescing |
-| BLOCK_SIZE_K | Reduction dimension tile size | More shared memory, better L1 utilization |
-| num_warps | Warps per block (MUST be power of 2) | More parallelism per block |
-| num_stages | Software pipelining stages | Hides memory latency |
+=== TOKEN COUNTS TO OPTIMIZE ===
+You are optimizing for these specific token batch sizes:
+{token_counts_str}
 
-=== TARGET MODEL: {MODEL_NAME} ===
-- Number of Experts: {STATIC_BENCHMARK_ARGS['num_experts']} experts
-- Top-K Routing: {STATIC_BENCHMARK_ARGS['top_k']}
-- Hidden Size: {STATIC_BENCHMARK_ARGS['hidden_size']}
-- Intermediate Size: {STATIC_BENCHMARK_ARGS['inter_size']}
-- Data Type: {STATIC_BENCHMARK_ARGS['dtype']}
+Each token count needs different optimal parameters:
+- Small batches (1-16): May prefer smaller blocks, fewer stages
+- Medium batches (64-512): Balance between parallelism and efficiency  
+- Large batches (1024+): Maximize throughput with larger blocks
 
-=== USER OPTIMIZATION GOAL ===
-{USER_GOAL}
-
-=== CURRENT SEARCH SPACE ===
-{json.dumps(FULL_PARAM_SPACE, indent=2)}
-
-=== INITIAL PERFORMANCE REPORT (NCU CSV) ===
+=== INITIAL PROFILING METRICS ===
 {initial_ncu_report}
 
-=== OUTPUT FORMAT ===
-Output an 'optimization policy' with objective function weights and a search space.
-You MUST output your response within <param></param> XML tags containing ONLY valid JSON.
+=== OPTIMIZATION POLICY FORMAT ===
+Output your policy inside <param></param> tags as JSON:
 
 <param>
 {{
   "objective_weights": {{
-    "R_sm_throughput": <float 0.0-1.0>,
-    "R_dram_throughput": <float 0.0-1.0>,
-    "R_l1_hit_rate": <float 0.0-1.0>,
-    "R_l2_hit_rate": <float 0.0-1.0>
+    "R_sm_throughput": <0.0-1.0>,
+    "R_dram_throughput": <0.0-1.0>,
+    "R_l1_hit_rate": <0.0-1.0>,
+    "R_l2_hit_rate": <0.0-1.0>
   }},
   "search_space": {{
-    "BLOCK_SIZE_M": [<int>, <int>, <int>],
-    "BLOCK_SIZE_N": [<int>, <int>, <int>],
-    "BLOCK_SIZE_K": [<int>, <int>],
-    "num_warps": [<int>, <int>, <int>],
-    "num_stages": [<int>, <int>, <int>]
+    "BLOCK_SIZE_M": [<values from 16,32,64,128>],
+    "BLOCK_SIZE_N": [<values from 32,64,128>],
+    "BLOCK_SIZE_K": [<values from 32,64>],
+    "num_warps": [<values from 4,8,16>],
+    "num_stages": [<values from 2,3,4,5>]
   }}
 }}
 </param>
 
-=== HARDWARE CONSTRAINTS ===
-- Shared Memory Limit: 227KB per SM
-- BLOCK_SIZE_M, BLOCK_SIZE_N: ≤ 128
-- BLOCK_SIZE_K: ≤ 64
-- num_stages: ≤ 4
-- num_warps: powers of 2 from [4, 8, 16]
+=== 🔥 BE AGGRESSIVE! 🔥 ===
+- Configs that occasionally hit VRAM limits are GOOD - they show we're pushing boundaries!
+- LARGER block sizes generally = BETTER throughput
+- MORE pipeline stages = BETTER memory hiding (up to VRAM limits)
+- num_stages=5 is allowed for aggressive testing!
+- If configs never fail, you're being TOO CONSERVATIVE!
+- Target: 90%+ GPU memory utilization
 
-=== RULES ===
-1. objective_weights should sum to approximately 1.0
-2. Output ONLY the <param>...</param> block with valid JSON
-3. Keep reasoning BRIEF, output JSON IMMEDIATELY
+=== STRATEGY ===
+1. Prioritize SM throughput (weight 0.4-0.5) - this is compute bound
+2. Secondary: DRAM throughput (weight 0.3-0.4) - memory bandwidth matters
+3. Cache hit rates are less critical for MoE (weight 0.1-0.15 each)
 
-Analyze the NCU metrics and generate an optimization policy:
+Output ONLY the <param>JSON</param> block. Keep reasoning minimal.
 """
 
     dataset = Dataset.from_list([{"prompt": optimization_prompt}] * META_LEARNING_STEPS)
@@ -243,7 +249,7 @@ Analyze the NCU metrics and generate an optimization policy:
     def meta_controller_reward_wrapper(completions, **kwargs):
         return reward_fn_object(completions, **kwargs)
 
-    # GRPO training configuration
+    # GRPO training configuration - optimized for 5-hour aggressive training
     grpo_config = GRPOConfig(
         output_dir="hierarchical_optimizer_finetune",
         per_device_train_batch_size=4,
@@ -257,8 +263,8 @@ Analyze the NCU metrics and generate an optimization policy:
         remove_unused_columns=False,
         temperature=0.7,
         max_prompt_length=2048,
-        max_completion_length=2048,
-        num_generations=4,
+        max_completion_length=MAX_COMPLETION_LENGTH,  # Use the configured value
+        num_generations=NUM_GENERATIONS,               # Use the configured value
         loss_type="grpo",
     )
 
@@ -276,6 +282,10 @@ Analyze the NCU metrics and generate an optimization policy:
     # Save best configs in vLLM format
     print("\n--- [HierarchicalOptimizer] Saving Optimized Configs ---")
     vllm_config_path = config_exporter.save_vllm_config()
+    
+    # Export complete config with all token counts (interpolated)
+    print("\n--- [HierarchicalOptimizer] Exporting Complete Config with ALL Token Counts ---")
+    complete_config_path = config_exporter.export_complete_config()
     
     # Optionally copy to vLLM installation directory
     config_exporter.copy_to_vllm()

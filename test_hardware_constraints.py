@@ -2,10 +2,10 @@
 Tests for H100 hardware constraint validation to prevent Triton shared memory overflow.
 
 These tests verify:
-1. Block sizes are clamped to 128 max in professor_reward.py
-2. num_stages is clamped to 4 max in professor_reward.py  
-3. Shared memory validation works correctly in benchmark_worker.py
-4. FULL_PARAM_SPACE in hakt_meta_trainer.py has safe values
+1. Block sizes are clamped to 128 max in meta_controller.py
+2. num_stages is clamped to 5 max (aggressive) in meta_controller.py  
+3. Shared memory validation works correctly in profiling_worker.py
+4. FULL_PARAM_SPACE in hierarchical_kernel_optimizer.py has safe values
 """
 
 # H100 hardware limits
@@ -14,7 +14,7 @@ These tests verify:
 H100_SHARED_MEM_LIMIT = 232448  # bytes (~227KB, conservative limit)
 H100_BLOCK_SIZE_MN_LIMIT = 128
 H100_BLOCK_SIZE_K_LIMIT = 64  # Lower limit for K to avoid overflow with high M/N
-H100_NUM_STAGES_LIMIT = 4
+H100_NUM_STAGES_LIMIT = 5  # Aggressive: Allow num_stages=5 for boundary testing
 
 
 def validate_triton_config(config):
@@ -134,26 +134,26 @@ def test_clamp_oversized_block_k():
 
 
 def test_clamp_oversized_num_stages():
-    """Test that num_stages > 4 is clamped to 4."""
-    pas = {"BLOCK_SIZE_M": [64], "BLOCK_SIZE_N": [64], "BLOCK_SIZE_K": [32], "num_stages": [5, 6, 8]}
+    """Test that num_stages > 5 is clamped to 5 (aggressive limit)."""
+    pas = {"BLOCK_SIZE_M": [64], "BLOCK_SIZE_N": [64], "BLOCK_SIZE_K": [32], "num_stages": [6, 7, 8]}
     result = clamp_block_sizes(pas)
     
-    assert all(v <= 4 for v in result["num_stages"]), f"num_stages should be clamped: {result['num_stages']}"
+    assert all(v <= 5 for v in result["num_stages"]), f"num_stages should be clamped to 5: {result['num_stages']}"
     print("✅ test_clamp_oversized_num_stages PASSED")
 
 
 def test_clamp_removes_duplicates():
     """Test that clamping removes duplicates after clamping."""
-    pas = {"BLOCK_SIZE_M": [256, 256, 128], "BLOCK_SIZE_N": [64], "BLOCK_SIZE_K": [32], "num_stages": [5, 5, 4]}
+    pas = {"BLOCK_SIZE_M": [256, 256, 128], "BLOCK_SIZE_N": [64], "BLOCK_SIZE_K": [32], "num_stages": [6, 6, 5]}
     result = clamp_block_sizes(pas)
     
     # [256, 256, 128] -> [128, 128, 128] -> [128] after dedup
     assert result["BLOCK_SIZE_M"] == [128], \
         f"Duplicates should be removed, expected [128], got: {result['BLOCK_SIZE_M']}"
     
-    # [5, 5, 4] -> [4, 4, 4] -> [4] after dedup
-    assert result["num_stages"] == [4], \
-        f"Duplicates should be removed, expected [4], got: {result['num_stages']}"
+    # [6, 6, 5] -> [5, 5, 5] -> [5] after dedup
+    assert result["num_stages"] == [5], \
+        f"Duplicates should be removed, expected [5], got: {result['num_stages']}"
     
     print("✅ test_clamp_removes_duplicates PASSED")
 
@@ -176,14 +176,15 @@ def test_clamp_preserves_safe_values():
 # =============================================================================
 
 def test_full_param_space_is_safe():
-    """Test that FULL_PARAM_SPACE from hakt_meta_trainer.py only contains safe values."""
-    # This is the constrained parameter space from hakt_meta_trainer.py
+    """Test that FULL_PARAM_SPACE from hierarchical_kernel_optimizer.py only contains safe values."""
+    # This is the constrained parameter space from hierarchical_kernel_optimizer.py
+    # Updated for aggressive optimization - includes num_stages=5
     FULL_PARAM_SPACE = {
         "BLOCK_SIZE_M": [16, 32, 64, 128],
         "BLOCK_SIZE_N": [32, 64, 128],
         "BLOCK_SIZE_K": [32, 64],  # Reduced to 64 max to avoid overflow
         "num_warps": [4, 8, 16],
-        "num_stages": [2, 3, 4]
+        "num_stages": [2, 3, 4, 5]  # Include 5 for aggressive testing
     }
     
     # Verify all block sizes within limits
@@ -191,8 +192,8 @@ def test_full_param_space_is_safe():
     assert all(v <= H100_BLOCK_SIZE_MN_LIMIT for v in FULL_PARAM_SPACE["BLOCK_SIZE_N"]), "BLOCK_SIZE_N has unsafe values"
     assert all(v <= H100_BLOCK_SIZE_K_LIMIT for v in FULL_PARAM_SPACE["BLOCK_SIZE_K"]), "BLOCK_SIZE_K has unsafe values"
     
-    # Verify num_stages <= 4
-    assert all(v <= 4 for v in FULL_PARAM_SPACE["num_stages"]), "num_stages has unsafe values"
+    # Verify num_stages <= 5 (aggressive)
+    assert all(v <= 5 for v in FULL_PARAM_SPACE["num_stages"]), "num_stages has unsafe values (> 5)"
     
     # Verify num_warps are powers of 2
     for w in FULL_PARAM_SPACE["num_warps"]:
@@ -202,9 +203,6 @@ def test_full_param_space_is_safe():
     assert 256 not in FULL_PARAM_SPACE["BLOCK_SIZE_M"], "256 should be removed from BLOCK_SIZE_M"
     assert 256 not in FULL_PARAM_SPACE["BLOCK_SIZE_N"], "256 should be removed from BLOCK_SIZE_N"
     assert 256 not in FULL_PARAM_SPACE["BLOCK_SIZE_K"], "256 should be removed from BLOCK_SIZE_K"
-    
-    # Verify num_stages doesn't have 5 (the problematic value)
-    assert 5 not in FULL_PARAM_SPACE["num_stages"], "5 should be removed from num_stages"
     
     # Verify BLOCK_SIZE_K doesn't have 128 (causes overflow with high M/N)
     assert 128 not in FULL_PARAM_SPACE["BLOCK_SIZE_K"], "128 should be removed from BLOCK_SIZE_K"

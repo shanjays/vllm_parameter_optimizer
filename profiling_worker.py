@@ -12,11 +12,14 @@ DEFAULT_CONFIG = {
     "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4,
 }
 
-PENALTY_SHARED_MEMORY = -50.0
-PENALTY_REGISTER_OVERFLOW = -75.0
-PENALTY_TIMEOUT = -75.0
+# Aggressive penalty constants - crashes near limits are informative!
+PENALTY_CUDA_OOM = -20.0          # Was -100. OOM tells us we found the limit!
+PENALTY_SHARED_MEMORY = -25.0     # Was -50. Shared mem limit is useful info
+PENALTY_REGISTER_OVERFLOW = -30.0 # Was -75. Register limit is useful info
+PENALTY_TIMEOUT = -50.0           # Was -75. Timeouts waste time
 PENALTY_PARSE_ERROR = -25.0
-PENALTY_TOTAL_FAILURE = -100.0
+PENALTY_TOTAL_FAILURE = -100.0    # Keep high for unknown failures
+PENALTY_TRITON_ERROR = -25.0      # Triton compilation failures
 
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_RETRY_DELAY = 1
@@ -97,18 +100,52 @@ class ProfilingWorker:
         return None
 
     def _categorize_error(self, stderr):
+        """Categorize error and return appropriate penalty."""
         if stderr is None:
             return "unknown", PENALTY_TOTAL_FAILURE
+        
         stderr_lower = stderr.lower() if isinstance(stderr, str) else str(stderr).lower()
-        if "shared memory" in stderr_lower:
+        
+        # CUDA OOM - we found the memory limit! This is valuable info.
+        if "cuda out of memory" in stderr_lower or "out of memory" in stderr_lower or "oom" in stderr_lower:
+            print(f"[ProfilingWorker] CUDA OOM detected - boundary found!")
+            return "cuda_oom", PENALTY_CUDA_OOM
+        
+        # Shared memory exceeded
+        if "shared memory" in stderr_lower or "smem" in stderr_lower:
+            print(f"[ProfilingWorker] Shared memory limit hit - boundary found!")
             return "shared_memory", PENALTY_SHARED_MEMORY
-        elif "register" in stderr_lower:
+        
+        # Register overflow
+        if "register" in stderr_lower or "spill" in stderr_lower:
+            print(f"[ProfilingWorker] Register overflow - boundary found!")
             return "register_overflow", PENALTY_REGISTER_OVERFLOW
-        elif "timeout" in stderr_lower:
+        
+        # Timeout
+        if "timeout" in stderr_lower:
             return "timeout", PENALTY_TIMEOUT
-        elif "oom" in stderr_lower or "out of memory" in stderr_lower:
-            return "cuda_oom", PENALTY_TOTAL_FAILURE
+        
+        # Triton compilation errors (often due to aggressive configs)
+        if "triton" in stderr_lower and ("error" in stderr_lower or "failed" in stderr_lower):
+            print(f"[ProfilingWorker] Triton compilation failed - config too aggressive")
+            return "triton_error", PENALTY_TRITON_ERROR
+        
         return "unknown", PENALTY_TOTAL_FAILURE
+
+    def _track_boundary_configs(self, config, error_type):
+        """Track configs that hit hardware limits for learning."""
+        if not hasattr(self, 'boundary_configs'):
+            self.boundary_configs = []
+        
+        self.boundary_configs.append({
+            'config': config.copy(),
+            'error_type': error_type,
+            'timestamp': time.time()
+        })
+        
+        # Keep last 50 boundary configs
+        if len(self.boundary_configs) > 50:
+            self.boundary_configs = self.boundary_configs[-50:]
 
     def _log_failed_config(self, config, error_type, error_msg):
         self.failed_configs.append({
@@ -368,17 +405,17 @@ class ProfilingWorker:
         except Exception:
             pass
 
-        # Use more conservative settings to avoid OOM errors
+        # Aggressive settings for maximum throughput testing
         command = [
             "python", "-m", "vllm.entrypoints.cli.main", "bench", "throughput",
             "--model", model_name,
             "--dataset-path", "ShareGPT_Vicuna_unfiltered.json", 
-            "--num-prompts", "100",  # Reduced from 200
+            "--num-prompts", "40",              # Reduced from 100 for faster iterations
             "--trust-remote-code",
             "--enforce-eager", 
             "--tensor-parallel-size", "1",
-            "--max-model-len", "4096",  # Reduced from 8192
-            "--gpu-memory-utilization", "0.85",  # Reduced from 0.97
+            "--max-model-len", "4096",
+            "--gpu-memory-utilization", "0.90",  # Aggressive (was 0.85)
         ]
         
         try:

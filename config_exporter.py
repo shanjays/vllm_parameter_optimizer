@@ -17,6 +17,13 @@ import json
 import os
 from datetime import datetime
 
+# All token counts that vLLM expects
+TOKEN_COUNTS_ALL = [
+    1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024,
+    1536, 2048, 3072, 4096, 5120, 9216, 13312, 17408,
+    25600, 33792, 41984, 50176, 58368
+]
+
 
 class VLLMConfigExporter:
     """
@@ -50,6 +57,9 @@ class VLLMConfigExporter:
         self.inter_size = inter_size    # N value
         self.device_name = device_name
         self._last_output_dir = self.DEFAULT_OUTPUT_DIR
+        
+        # All token counts that vLLM expects
+        self.all_token_counts = TOKEN_COUNTS_ALL
         
         # Best config for each token count
         self.best_configs = {}
@@ -167,6 +177,84 @@ class VLLMConfigExporter:
             "best_rewards": self.best_rewards.copy(),
             "config_filename": self.get_config_filename()
         }
+    
+    def export_complete_config(self, output_path=None):
+        """
+        Export config with ALL token counts, interpolating missing ones.
+        
+        Args:
+            output_path: Optional output file path. If None, uses default filename.
+            
+        Returns:
+            str: Path to the saved config file, or None if no configs available
+        """
+        if output_path is None:
+            filename = f"E={self.num_experts},N={self.inter_size},device_name={self.device_name}.json"
+            output_path = os.path.join(self._last_output_dir, filename)
+        
+        # Get tested token counts
+        tested_counts = sorted([int(k) for k in self.best_configs.keys()])
+        
+        if not tested_counts:
+            print("[ConfigExporter] ERROR: No configs to export!")
+            return None
+        
+        # Build complete config with interpolation
+        complete_config = {}
+        
+        for token_count in self.all_token_counts:
+            if str(token_count) in self.best_configs:
+                # Use actual tested config
+                complete_config[str(token_count)] = self.best_configs[str(token_count)].copy()
+            else:
+                # Interpolate from nearest tested config
+                nearest = self._find_nearest_config(token_count, tested_counts)
+                complete_config[str(token_count)] = self.best_configs[str(nearest)].copy()
+                print(f"[ConfigExporter] Token {token_count} → using config from token {nearest}")
+        
+        # Ensure output directory exists
+        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
+        
+        # Save complete config
+        with open(output_path, "w") as f:
+            json.dump(complete_config, f, indent=2)
+        
+        print(f"[ConfigExporter] Exported complete config with {len(complete_config)} token counts")
+        print(f"[ConfigExporter] Saved to: {output_path}")
+        
+        return output_path
+    
+    def _find_nearest_config(self, target, tested_counts):
+        """
+        Find nearest tested token count for interpolation.
+        
+        Strategy:
+        - For targets beyond tested range: use nearest boundary
+        - For targets within range: use nearest tested count, with tie-breaker
+          preferring the lower count for safety (proven configs work)
+        
+        Args:
+            target: Target token count to find config for
+            tested_counts: List of token counts that have been tested
+            
+        Returns:
+            int: Nearest tested token count
+        """
+        if not tested_counts:
+            return 1  # Fallback to smallest
+        
+        # Handle boundary cases first
+        if target > max(tested_counts):
+            return max(tested_counts)
+        elif target < min(tested_counts):
+            return min(tested_counts)
+        
+        # Find bracketing values for targets within range
+        lower = max([c for c in tested_counts if c <= target], default=min(tested_counts))
+        upper = min([c for c in tested_counts if c >= target], default=max(tested_counts))
+        
+        # Prefer lower for safety when equidistant (proven configs work)
+        return lower if (target - lower) <= (upper - target) else upper
     
     def copy_to_vllm(self, vllm_config_dir=None):
         """
