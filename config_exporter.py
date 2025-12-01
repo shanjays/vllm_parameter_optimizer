@@ -228,6 +228,11 @@ class VLLMConfigExporter:
         """
         Find nearest tested token count for interpolation.
         
+        Strategy:
+        - For targets beyond tested range: use nearest boundary
+        - For targets within range: use nearest tested count, with tie-breaker
+          preferring the lower count for safety (proven configs work)
+        
         Args:
             target: Target token count to find config for
             tested_counts: List of token counts that have been tested
@@ -238,22 +243,18 @@ class VLLMConfigExporter:
         if not tested_counts:
             return 1  # Fallback to smallest
         
-        # Find closest tested count
-        closest = min(tested_counts, key=lambda x: abs(x - target))
-        
-        # For large targets, prefer smaller tested counts (more conservative)
-        # For small targets, prefer exact or slightly larger
+        # Handle boundary cases first
         if target > max(tested_counts):
             return max(tested_counts)
         elif target < min(tested_counts):
             return min(tested_counts)
-        else:
-            # Find bracketing values
-            lower = max([c for c in tested_counts if c <= target], default=min(tested_counts))
-            upper = min([c for c in tested_counts if c >= target], default=max(tested_counts))
-            
-            # Prefer lower for safety (proven to work)
-            return lower if (target - lower) <= (upper - target) else upper
+        
+        # Find bracketing values for targets within range
+        lower = max([c for c in tested_counts if c <= target], default=min(tested_counts))
+        upper = min([c for c in tested_counts if c >= target], default=max(tested_counts))
+        
+        # Prefer lower for safety when equidistant (proven configs work)
+        return lower if (target - lower) <= (upper - target) else upper
     
     def copy_to_vllm(self, vllm_config_dir=None):
         """

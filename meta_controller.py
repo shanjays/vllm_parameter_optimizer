@@ -8,6 +8,7 @@ import ast
 from kernel_tuning_env import KernelTuningEnvironment
 from exploration_agent import ExplorationAgent
 from profiling_worker import ProfilingWorker
+from config_exporter import TOKEN_COUNTS_ALL
 
 POWER_OF_TWO_WARPS = (2, 4, 8, 16, 32)
 
@@ -36,13 +37,6 @@ DEFAULT_MISSION_PLAN = {
 
 # Token counts for training (key representative values for 5-hour run)
 TOKEN_COUNTS_TRAINING = [1, 16, 64, 256, 1024, 4096, 16384]
-
-# All token counts that vLLM expects (for final export with interpolation)
-TOKEN_COUNTS_ALL = [
-    1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024,
-    1536, 2048, 3072, 4096, 5120, 9216, 13312, 17408,
-    25600, 33792, 41984, 50176, 58368
-]
 
 # Default token counts to test (matching vLLM's expected format)
 DEFAULT_TOKEN_COUNTS = TOKEN_COUNTS_TRAINING
@@ -102,7 +96,12 @@ class MetaControllerReward:
             if not os.path.exists(self.vllm_config_dir):
                 self.vllm_config_dir = "/tmp/vllm_configs/"
             os.makedirs(self.vllm_config_dir, exist_ok=True)
-        except Exception:
+        except ImportError:
+            print("[MetaController] vLLM not installed, using fallback config directory")
+            self.vllm_config_dir = "/tmp/vllm_configs/"
+            os.makedirs(self.vllm_config_dir, exist_ok=True)
+        except OSError as e:
+            print(f"[MetaController] Could not create vLLM config directory: {e}")
             self.vllm_config_dir = "/tmp/vllm_configs/"
             os.makedirs(self.vllm_config_dir, exist_ok=True)
         

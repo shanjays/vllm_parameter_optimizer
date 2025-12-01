@@ -23,7 +23,7 @@ from transformers import AutoTokenizer
 from trl import GRPOTrainer, GRPOConfig
 
 from meta_controller import MetaControllerReward
-from config_exporter import VLLMConfigExporter
+from config_exporter import VLLMConfigExporter, TOKEN_COUNTS_ALL
 
 META_CONTROLLER_GPU_ID = 0
 PROFILING_GPU_ID = 7
@@ -32,13 +32,6 @@ PROFILING_GPU_ID = 7
 
 # Token counts for training (key representative values)
 TOKEN_COUNTS_TRAINING = [1, 16, 64, 256, 1024, 4096, 16384]
-
-# All token counts for final export
-TOKEN_COUNTS_ALL = [
-    1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024,
-    1536, 2048, 3072, 4096, 5120, 9216, 13312, 17408,
-    25600, 33792, 41984, 50176, 58368
-]
 
 # Token counts to test (matching vLLM's expected format)
 TOKEN_COUNTS_TO_TEST = TOKEN_COUNTS_TRAINING
