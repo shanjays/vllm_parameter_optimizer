@@ -145,21 +145,32 @@ def test_save_vllm_config():
 
 def test_save_vllm_config_sorted_keys():
     """Test that token counts are sorted numerically in output."""
-    exporter = VLLMConfigExporter(num_experts=128, inter_size=1536)
-    
-    # Add in non-sorted order
-    for token_count in [128, 1, 64, 16, 4]:
-        exporter.update_best_config(token_count, {"BLOCK_SIZE_M": 64}, reward=50.0)
-    
     temp_dir = tempfile.mkdtemp()
     try:
+        exporter = VLLMConfigExporter(num_experts=128, inter_size=1536, output_dir=temp_dir)
+        
+        # Add in non-sorted order
+        for token_count in [128, 1, 64, 16, 4]:
+            exporter.update_best_config(token_count, {"BLOCK_SIZE_M": 64}, reward=50.0)
+        
         vllm_path = exporter.save_vllm_config(output_dir=temp_dir)
-        with open(vllm_path, 'r') as f:
+        
+        # Read the local config file
+        local_path = os.path.join(temp_dir, exporter.get_config_filename())
+        with open(local_path, 'r') as f:
             vllm_config = json.load(f)
         
-        keys = list(vllm_config.keys())
-        expected = ["1", "4", "16", "64", "128"]
-        assert keys == expected, f"Keys should be numerically sorted: {keys}"
+        # Now all token counts should be present (with defaults)
+        from config_exporter import TOKEN_COUNTS_ALL
+        assert len(vllm_config) == len(TOKEN_COUNTS_ALL), f"Should have all {len(TOKEN_COUNTS_ALL)} token counts"
+        
+        # Verify the manually set configs have our values
+        assert vllm_config["1"]["BLOCK_SIZE_M"] == 64, "Token 1 should have updated config"
+        assert vllm_config["4"]["BLOCK_SIZE_M"] == 64, "Token 4 should have updated config"
+        assert vllm_config["16"]["BLOCK_SIZE_M"] == 64, "Token 16 should have updated config"
+        assert vllm_config["64"]["BLOCK_SIZE_M"] == 64, "Token 64 should have updated config"
+        assert vllm_config["128"]["BLOCK_SIZE_M"] == 64, "Token 128 should have updated config"
+        
         print("✅ test_save_vllm_config_sorted_keys PASSED")
     finally:
         shutil.rmtree(temp_dir)
@@ -167,20 +178,28 @@ def test_save_vllm_config_sorted_keys():
 
 def test_get_summary():
     """Test that summary returns correct information."""
-    exporter = VLLMConfigExporter(num_experts=128, inter_size=1536)
-    
-    exporter.update_best_config(1, {"BLOCK_SIZE_M": 64}, reward=30.0)
-    exporter.update_best_config(16, {"BLOCK_SIZE_M": 64}, reward=50.0)
-    exporter.update_best_config(16, {"BLOCK_SIZE_M": 128}, reward=60.0)  # Better config
-    
-    summary = exporter.get_summary()
-    
-    assert summary["total_token_counts"] == 2, "Should have 2 token counts"
-    assert summary["total_experiments"] == 3, "Should have 3 experiments"
-    assert summary["best_rewards"]["1"] == 30.0, "Token 1 reward should be 30.0"
-    assert summary["best_rewards"]["16"] == 60.0, "Token 16 reward should be 60.0"
-    assert summary["config_filename"] == "E=128,N=1536,device_name=NVIDIA_H100_80GB_HBM3.json"
-    print("✅ test_get_summary PASSED")
+    temp_dir = tempfile.mkdtemp()
+    try:
+        exporter = VLLMConfigExporter(num_experts=128, inter_size=1536, output_dir=temp_dir)
+        
+        exporter.update_best_config(1, {"BLOCK_SIZE_M": 64}, reward=30.0)
+        exporter.update_best_config(16, {"BLOCK_SIZE_M": 64}, reward=50.0)
+        exporter.update_best_config(16, {"BLOCK_SIZE_M": 128}, reward=60.0)  # Better config
+        
+        summary = exporter.get_summary()
+        
+        # All token counts are initialized with defaults
+        from config_exporter import TOKEN_COUNTS_ALL
+        assert summary["total_token_counts"] == len(TOKEN_COUNTS_ALL), f"Should have all {len(TOKEN_COUNTS_ALL)} token counts"
+        assert summary["total_experiments"] == 3, "Should have 3 experiments"
+        assert summary["tested_token_counts"] == 2, "Should have 2 tested token counts with reward > 0"
+        assert summary["best_rewards"]["1"] == 30.0, "Token 1 reward should be 30.0"
+        assert summary["best_rewards"]["16"] == 60.0, "Token 16 reward should be 60.0"
+        assert summary["config_filename"] == "E=128,N=1536,device_name=NVIDIA_H100_80GB_HBM3.json"
+        assert "config_path" in summary, "Should include config_path"
+        print("✅ test_get_summary PASSED")
+    finally:
+        shutil.rmtree(temp_dir)
 
 
 def test_default_config_values():
@@ -203,18 +222,30 @@ def test_default_config_values():
 
 def test_multiple_token_counts():
     """Test handling of many token counts (simulating full run)."""
-    exporter = VLLMConfigExporter(num_experts=128, inter_size=1536)
-    
-    # Simulate vLLM token count values
-    token_counts = [1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024]
-    
-    for tc in token_counts:
-        config = {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "num_warps": 4, "num_stages": 4}
-        exporter.update_best_config(tc, config, reward=50.0 + tc * 0.01)
-    
-    assert len(exporter.best_configs) == len(token_counts), f"Should have {len(token_counts)} configs"
-    assert len(exporter.all_results) == len(token_counts), f"Should have {len(token_counts)} results"
-    print("✅ test_multiple_token_counts PASSED")
+    temp_dir = tempfile.mkdtemp()
+    try:
+        exporter = VLLMConfigExporter(num_experts=128, inter_size=1536, output_dir=temp_dir)
+        
+        # Simulate vLLM token count values
+        token_counts = [1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024]
+        
+        for tc in token_counts:
+            config = {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "num_warps": 4, "num_stages": 4}
+            exporter.update_best_config(tc, config, reward=50.0 + tc * 0.01)
+        
+        # All token counts are initialized with defaults, so best_configs has all of them
+        from config_exporter import TOKEN_COUNTS_ALL
+        assert len(exporter.best_configs) == len(TOKEN_COUNTS_ALL), f"Should have {len(TOKEN_COUNTS_ALL)} configs (all initialized)"
+        assert len(exporter.all_results) == len(token_counts), f"Should have {len(token_counts)} results"
+        
+        # Verify the manually set configs have our values
+        for tc in token_counts:
+            assert exporter.best_configs[str(tc)]["BLOCK_SIZE_M"] == 64, f"Token {tc} should have updated config"
+            assert exporter.best_rewards[str(tc)] == 50.0 + tc * 0.01, f"Token {tc} should have correct reward"
+        
+        print("✅ test_multiple_token_counts PASSED")
+    finally:
+        shutil.rmtree(temp_dir)
 
 
 def test_export_complete_config_interpolation():
@@ -292,6 +323,124 @@ def test_all_token_counts_constant():
     print("✅ test_all_token_counts_constant PASSED")
 
 
+def test_initialization_creates_config_with_defaults():
+    """Test that VLLMConfigExporter creates config file with defaults on initialization."""
+    temp_dir = tempfile.mkdtemp()
+    try:
+        exporter = VLLMConfigExporter(num_experts=128, inter_size=768, output_dir=temp_dir)
+        
+        # Check that config file was created in vllm_config_dir
+        config_path = os.path.join(exporter.vllm_config_dir, exporter.config_filename)
+        assert os.path.exists(config_path), f"Config file should be created at {config_path}"
+        
+        # Load and verify contents
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        # Should have all token counts
+        from config_exporter import TOKEN_COUNTS_ALL
+        assert len(config) == len(TOKEN_COUNTS_ALL), f"Should have all {len(TOKEN_COUNTS_ALL)} token counts"
+        
+        # Each should have default values
+        for tc_str in ["1", "64", "1024", "4096"]:
+            assert tc_str in config, f"Token count {tc_str} should be in config"
+            assert config[tc_str]["BLOCK_SIZE_M"] == 64, f"Token {tc_str} should have default BLOCK_SIZE_M=64"
+            assert config[tc_str]["BLOCK_SIZE_N"] == 64, f"Token {tc_str} should have default BLOCK_SIZE_N=64"
+            assert config[tc_str]["num_warps"] == 8, f"Token {tc_str} should have default num_warps=8"
+            assert config[tc_str]["num_stages"] == 4, f"Token {tc_str} should have default num_stages=4"
+        
+        print("✅ test_initialization_creates_config_with_defaults PASSED")
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_initialization_loads_existing_config():
+    """Test that VLLMConfigExporter loads existing config if present."""
+    temp_dir = tempfile.mkdtemp()
+    try:
+        # Create an initial config file manually
+        vllm_configs_dir = os.path.join(temp_dir, "vllm_configs")
+        os.makedirs(vllm_configs_dir, exist_ok=True)
+        
+        config_filename = "E=64,N=256,device_name=TEST_GPU.json"
+        config_path = os.path.join(vllm_configs_dir, config_filename)
+        
+        custom_config = {
+            "1": {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64, "num_warps": 16, "num_stages": 3},
+            "16": {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "num_warps": 8, "num_stages": 4}
+        }
+        with open(config_path, 'w') as f:
+            json.dump(custom_config, f)
+        
+        # Create exporter - it should load existing config
+        exporter = VLLMConfigExporter(num_experts=64, inter_size=256, device_name="TEST_GPU", output_dir=temp_dir)
+        
+        # Verify the loaded config
+        assert exporter.best_configs["1"]["BLOCK_SIZE_M"] == 32, "Should load existing BLOCK_SIZE_M"
+        assert exporter.best_configs["1"]["num_warps"] == 16, "Should load existing num_warps"
+        assert exporter.best_configs["16"]["BLOCK_SIZE_N"] == 64, "Should load existing BLOCK_SIZE_N"
+        
+        print("✅ test_initialization_loads_existing_config PASSED")
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_update_best_config_updates_file_immediately():
+    """Test that updating best config immediately updates the config file."""
+    temp_dir = tempfile.mkdtemp()
+    try:
+        exporter = VLLMConfigExporter(num_experts=128, inter_size=768, output_dir=temp_dir)
+        
+        # Update a config
+        new_config = {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64, "num_warps": 16, "num_stages": 3}
+        exporter.update_best_config(64, new_config, reward=75.0)
+        
+        # Read the config file and verify it was updated
+        config_path = os.path.join(exporter.vllm_config_dir, exporter.config_filename)
+        with open(config_path, 'r') as f:
+            file_config = json.load(f)
+        
+        assert file_config["64"]["BLOCK_SIZE_M"] == 128, "File should be updated immediately"
+        assert file_config["64"]["BLOCK_SIZE_N"] == 128, "File should be updated immediately"
+        assert file_config["64"]["num_warps"] == 16, "File should be updated immediately"
+        
+        print("✅ test_update_best_config_updates_file_immediately PASSED")
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_corrupt_config_file_creates_new():
+    """Test that a corrupt config file is replaced with new defaults."""
+    temp_dir = tempfile.mkdtemp()
+    try:
+        # Create a corrupt config file
+        vllm_configs_dir = os.path.join(temp_dir, "vllm_configs")
+        os.makedirs(vllm_configs_dir, exist_ok=True)
+        
+        config_filename = "E=32,N=512,device_name=TEST_GPU.json"
+        config_path = os.path.join(vllm_configs_dir, config_filename)
+        
+        # Write invalid JSON
+        with open(config_path, 'w') as f:
+            f.write("{invalid json content}")
+        
+        # Create exporter - it should handle the corrupt file and create new defaults
+        exporter = VLLMConfigExporter(num_experts=32, inter_size=512, device_name="TEST_GPU", output_dir=temp_dir)
+        
+        # Verify the config was recreated with defaults
+        from config_exporter import TOKEN_COUNTS_ALL
+        assert len(exporter.best_configs) == len(TOKEN_COUNTS_ALL), "Should have all token counts with defaults"
+        
+        # Verify the file is now valid
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        assert len(config) == len(TOKEN_COUNTS_ALL), "File should have all token counts"
+        
+        print("✅ test_corrupt_config_file_creates_new PASSED")
+    finally:
+        shutil.rmtree(temp_dir)
+
+
 if __name__ == "__main__":
     print("--- CONFIG EXPORTER TESTS ---\n")
     
@@ -318,6 +467,12 @@ if __name__ == "__main__":
     print("\n=== Summary Tests ===")
     test_get_summary()
     test_multiple_token_counts()
+    
+    print("\n=== Config Initialization Tests ===")
+    test_initialization_creates_config_with_defaults()
+    test_initialization_loads_existing_config()
+    test_update_best_config_updates_file_immediately()
+    test_corrupt_config_file_creates_new()
     
     print("\n" + "="*60)
     print("✅ ALL CONFIG EXPORTER TESTS PASSED")
