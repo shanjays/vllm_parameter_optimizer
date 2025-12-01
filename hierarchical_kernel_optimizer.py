@@ -31,7 +31,7 @@ PROFILING_GPU_ID = 7
 # ============== 5-HOUR AGGRESSIVE TRAINING CONFIG ==============
 
 # Token counts for training (key representative values)
-TOKEN_COUNTS_TRAINING = [1, 16, 64, 256, 1024, 4096, 16384]
+TOKEN_COUNTS_TRAINING = [1, 16, 64, 256, 1024, 4096]
 
 # Token counts to test (matching vLLM's expected format)
 TOKEN_COUNTS_TO_TEST = TOKEN_COUNTS_TRAINING
@@ -46,7 +46,7 @@ RUN_SCRIPT_PATH = "run_kernel_benchmark.py"
 
 # Meta-learning (outer loop) - optimized for 5-hour run
 EXPLORATION_STEPS = 10            # Increased from 8 for better exploration
-META_LEARNING_STEPS = 8           # Reduced from 50 for 5-hour run
+META_LEARNING_STEPS = 4           # Reduced from 50 for 5-hour run
 NUM_GENERATIONS = 4               # Reduced from 8
 MAX_COMPLETION_LENGTH = 1536      # Increased from 1024 for aggressive prompts
 
@@ -304,5 +304,6 @@ Output ONLY the <param>JSON</param> block. Keep reasoning minimal.
 
 if __name__ == "__main__":
     main()
+
 
 
