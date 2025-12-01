@@ -162,19 +162,28 @@ class KernelTuningEnvironment(gym.Env):
         
         # Send the profiling request to the worker
         # Pass the current token count for multi-token testing
-        result_id = self.profiling_worker.run_kernel_profiling.remote(
-            params, self.static_args, self.objective_weights, self.current_token_count
-        )
-        # Wait for the result
-        state, reward, csv_data = ray.get(result_id)
+        try:
+            result_id = self.profiling_worker.run_kernel_profiling.remote(
+                params, self.static_args, self.objective_weights, self.current_token_count
+            )
+            # Wait for the result
+            state, reward, csv_data = ray.get(result_id)
+        except Exception as e:
+            # Handle VRAM crashes and other exceptions gracefully
+            print(f"[KernelTuningEnv] Profiling failed with exception: {e}")
+            state = None
+            reward = -20.0  # Use aggressive penalty for OOM-like errors
+            csv_data = None
         
         done = False
         truncated = False
         
         if state is None:
             # The profiling worker reported a failure (e.g., OOM, timeout)
+            # This is valuable boundary information for aggressive optimization!
             state = self.initial_state  # Reset to avoid errors
-            # reward is already negative (as set by worker)
+            # reward is already negative (as set by worker or exception handler)
+            print(f"[KernelTuningEnv] Config failed (boundary found): {params}, reward={reward}")
         else:
             # Update config exporter with the result if available
             if self.config_exporter is not None:

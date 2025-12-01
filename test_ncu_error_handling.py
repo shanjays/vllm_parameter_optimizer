@@ -2,7 +2,7 @@
 Tests for NCU error handling with retry logic and better diagnostics.
 
 Tests verify:
-1. Error penalty constants are correctly defined
+1. Error penalty constants are correctly defined (aggressive optimization)
 2. Error categorization works for different error types
 3. Config reduction logic works correctly
 4. Failure stats tracking works
@@ -11,13 +11,15 @@ Tests verify:
 
 import time
 
-# Copy of error penalty constants from benchmark_worker.py for testing
-# (avoiding heavy dependency imports like ray)
-PENALTY_SHARED_MEMORY = -50.0
-PENALTY_REGISTER_OVERFLOW = -75.0
-PENALTY_TIMEOUT = -75.0
+# Copy of error penalty constants from profiling_worker.py for testing
+# Updated for aggressive optimization (less severe penalties for boundary-finding errors)
+PENALTY_CUDA_OOM = -20.0          # OOM tells us we found the limit!
+PENALTY_SHARED_MEMORY = -25.0     # Shared mem limit is useful info
+PENALTY_REGISTER_OVERFLOW = -30.0 # Register limit is useful info
+PENALTY_TIMEOUT = -50.0           # Timeouts waste time
 PENALTY_PARSE_ERROR = -25.0
-PENALTY_TOTAL_FAILURE = -100.0
+PENALTY_TOTAL_FAILURE = -100.0    # Keep high for unknown failures
+PENALTY_TRITON_ERROR = -25.0      # Triton compilation failures
 
 
 # =============================================================================
@@ -25,21 +27,23 @@ PENALTY_TOTAL_FAILURE = -100.0
 # =============================================================================
 
 def test_penalty_constants_exist():
-    """Test that all penalty constants are defined."""
-    assert PENALTY_SHARED_MEMORY == -50.0, "PENALTY_SHARED_MEMORY should be -50.0"
-    assert PENALTY_REGISTER_OVERFLOW == -75.0, "PENALTY_REGISTER_OVERFLOW should be -75.0"
-    assert PENALTY_TIMEOUT == -75.0, "PENALTY_TIMEOUT should be -75.0"
+    """Test that all penalty constants are defined with aggressive values."""
+    assert PENALTY_CUDA_OOM == -20.0, "PENALTY_CUDA_OOM should be -20.0 (aggressive)"
+    assert PENALTY_SHARED_MEMORY == -25.0, "PENALTY_SHARED_MEMORY should be -25.0 (aggressive)"
+    assert PENALTY_REGISTER_OVERFLOW == -30.0, "PENALTY_REGISTER_OVERFLOW should be -30.0 (aggressive)"
+    assert PENALTY_TIMEOUT == -50.0, "PENALTY_TIMEOUT should be -50.0"
     assert PENALTY_PARSE_ERROR == -25.0, "PENALTY_PARSE_ERROR should be -25.0"
     assert PENALTY_TOTAL_FAILURE == -100.0, "PENALTY_TOTAL_FAILURE should be -100.0"
+    assert PENALTY_TRITON_ERROR == -25.0, "PENALTY_TRITON_ERROR should be -25.0"
     print("✅ test_penalty_constants_exist PASSED")
 
 
 def test_penalty_ordering():
     """Test that penalties are ordered by severity (less negative = less severe)."""
-    # Parse error should be least severe (closest to 0)
-    assert PENALTY_PARSE_ERROR > PENALTY_SHARED_MEMORY, "Parse error should be less severe than shared memory"
+    # CUDA OOM should be least severe (boundary finding is informative!)
+    assert PENALTY_CUDA_OOM > PENALTY_SHARED_MEMORY, "CUDA OOM should be less severe than shared memory"
     assert PENALTY_SHARED_MEMORY > PENALTY_REGISTER_OVERFLOW, "Shared memory should be less severe than register overflow"
-    assert PENALTY_TIMEOUT >= PENALTY_REGISTER_OVERFLOW, "Timeout should be at least as severe as register overflow"
+    assert PENALTY_REGISTER_OVERFLOW > PENALTY_TIMEOUT, "Register overflow should be less severe than timeout"
     assert PENALTY_TOTAL_FAILURE < PENALTY_TIMEOUT, "Total failure should be most severe"
     print("✅ test_penalty_ordering PASSED")
 
@@ -48,30 +52,39 @@ def test_penalty_ordering():
 # Tests for error categorization
 # =============================================================================
 
+def _categorize_error_for_test(stderr):
+    """Copy of _categorize_error logic for testing (matches profiling_worker.py)."""
+    if stderr is None:
+        return "unknown", PENALTY_TOTAL_FAILURE
+    
+    stderr_lower = stderr.lower() if isinstance(stderr, str) else str(stderr).lower()
+    
+    # CUDA OOM - we found the memory limit! This is valuable info.
+    if "cuda out of memory" in stderr_lower or "out of memory" in stderr_lower or "oom" in stderr_lower:
+        return "cuda_oom", PENALTY_CUDA_OOM
+    
+    # Shared memory exceeded
+    if "shared memory" in stderr_lower or "smem" in stderr_lower:
+        return "shared_memory", PENALTY_SHARED_MEMORY
+    
+    # Register overflow
+    if "register" in stderr_lower or "spill" in stderr_lower:
+        return "register_overflow", PENALTY_REGISTER_OVERFLOW
+    
+    # Timeout
+    if "timeout" in stderr_lower:
+        return "timeout", PENALTY_TIMEOUT
+    
+    # Triton compilation errors
+    if "triton" in stderr_lower and ("error" in stderr_lower or "failed" in stderr_lower):
+        return "triton_error", PENALTY_TRITON_ERROR
+    
+    return "unknown", PENALTY_TOTAL_FAILURE
+
+
 def test_categorize_error_shared_memory():
     """Test that shared memory errors are correctly categorized."""
-    # Create a mock instance to test the method
-    # We need to test the logic without instantiating the full Ray actor
-    
-    def categorize_error(stderr):
-        """Copy of _categorize_error logic for testing."""
-        if stderr is None:
-            return "unknown", PENALTY_TOTAL_FAILURE
-        
-        stderr_lower = stderr.lower()
-        
-        if "out of resource: shared memory" in stderr_lower:
-            return "shared_memory", PENALTY_SHARED_MEMORY
-        elif "insufficient registers" in stderr_lower:
-            return "register_overflow", PENALTY_REGISTER_OVERFLOW
-        elif "timeout" in stderr_lower:
-            return "timeout", PENALTY_TIMEOUT
-        elif "cuda out of memory" in stderr_lower or "oom" in stderr_lower:
-            return "cuda_oom", PENALTY_TOTAL_FAILURE
-        else:
-            return "unknown", PENALTY_TOTAL_FAILURE
-    
-    error_type, penalty = categorize_error("Error: Out of resource: shared memory required")
+    error_type, penalty = _categorize_error_for_test("Error: Out of resource: shared memory required")
     assert error_type == "shared_memory", f"Expected shared_memory, got {error_type}"
     assert penalty == PENALTY_SHARED_MEMORY, f"Expected {PENALTY_SHARED_MEMORY}, got {penalty}"
     print("✅ test_categorize_error_shared_memory PASSED")
@@ -79,24 +92,7 @@ def test_categorize_error_shared_memory():
 
 def test_categorize_error_register_overflow():
     """Test that register overflow errors are correctly categorized."""
-    def categorize_error(stderr):
-        if stderr is None:
-            return "unknown", PENALTY_TOTAL_FAILURE
-        
-        stderr_lower = stderr.lower()
-        
-        if "out of resource: shared memory" in stderr_lower:
-            return "shared_memory", PENALTY_SHARED_MEMORY
-        elif "insufficient registers" in stderr_lower:
-            return "register_overflow", PENALTY_REGISTER_OVERFLOW
-        elif "timeout" in stderr_lower:
-            return "timeout", PENALTY_TIMEOUT
-        elif "cuda out of memory" in stderr_lower or "oom" in stderr_lower:
-            return "cuda_oom", PENALTY_TOTAL_FAILURE
-        else:
-            return "unknown", PENALTY_TOTAL_FAILURE
-    
-    error_type, penalty = categorize_error("ptxas error: Insufficient registers for kernel")
+    error_type, penalty = _categorize_error_for_test("ptxas error: Insufficient registers for kernel")
     assert error_type == "register_overflow", f"Expected register_overflow, got {error_type}"
     assert penalty == PENALTY_REGISTER_OVERFLOW, f"Expected {PENALTY_REGISTER_OVERFLOW}, got {penalty}"
     print("✅ test_categorize_error_register_overflow PASSED")
@@ -104,104 +100,39 @@ def test_categorize_error_register_overflow():
 
 def test_categorize_error_timeout():
     """Test that timeout errors are correctly categorized."""
-    def categorize_error(stderr):
-        if stderr is None:
-            return "unknown", PENALTY_TOTAL_FAILURE
-        
-        stderr_lower = stderr.lower()
-        
-        if "out of resource: shared memory" in stderr_lower:
-            return "shared_memory", PENALTY_SHARED_MEMORY
-        elif "insufficient registers" in stderr_lower:
-            return "register_overflow", PENALTY_REGISTER_OVERFLOW
-        elif "timeout" in stderr_lower:
-            return "timeout", PENALTY_TIMEOUT
-        elif "cuda out of memory" in stderr_lower or "oom" in stderr_lower:
-            return "cuda_oom", PENALTY_TOTAL_FAILURE
-        else:
-            return "unknown", PENALTY_TOTAL_FAILURE
-    
-    error_type, penalty = categorize_error("Timeout expired")
+    error_type, penalty = _categorize_error_for_test("Process killed: timeout expired after 60s")
     assert error_type == "timeout", f"Expected timeout, got {error_type}"
     assert penalty == PENALTY_TIMEOUT, f"Expected {PENALTY_TIMEOUT}, got {penalty}"
     print("✅ test_categorize_error_timeout PASSED")
 
 
 def test_categorize_error_cuda_oom():
-    """Test that CUDA OOM errors are correctly categorized."""
-    def categorize_error(stderr):
-        if stderr is None:
-            return "unknown", PENALTY_TOTAL_FAILURE
-        
-        stderr_lower = stderr.lower()
-        
-        if "out of resource: shared memory" in stderr_lower:
-            return "shared_memory", PENALTY_SHARED_MEMORY
-        elif "insufficient registers" in stderr_lower:
-            return "register_overflow", PENALTY_REGISTER_OVERFLOW
-        elif "timeout" in stderr_lower:
-            return "timeout", PENALTY_TIMEOUT
-        elif "cuda out of memory" in stderr_lower or "oom" in stderr_lower:
-            return "cuda_oom", PENALTY_TOTAL_FAILURE
-        else:
-            return "unknown", PENALTY_TOTAL_FAILURE
-    
-    # Test "cuda out of memory"
-    error_type, penalty = categorize_error("RuntimeError: CUDA out of memory")
+    """Test that CUDA OOM errors are correctly categorized with aggressive penalty."""
+    error_type, penalty = _categorize_error_for_test("RuntimeError: CUDA out of memory. Tried to allocate 2.00 GiB")
     assert error_type == "cuda_oom", f"Expected cuda_oom, got {error_type}"
-    assert penalty == PENALTY_TOTAL_FAILURE, f"Expected {PENALTY_TOTAL_FAILURE}, got {penalty}"
-    
-    # Test "oom"
-    error_type, penalty = categorize_error("OOM error occurred")
-    assert error_type == "cuda_oom", f"Expected cuda_oom, got {error_type}"
+    assert penalty == PENALTY_CUDA_OOM, f"Expected {PENALTY_CUDA_OOM} (aggressive), got {penalty}"
     print("✅ test_categorize_error_cuda_oom PASSED")
 
 
+def test_categorize_error_triton():
+    """Test that Triton compilation errors are correctly categorized."""
+    error_type, penalty = _categorize_error_for_test("triton.compiler.CompilationError: failed to compile kernel")
+    assert error_type == "triton_error", f"Expected triton_error, got {error_type}"
+    assert penalty == PENALTY_TRITON_ERROR, f"Expected {PENALTY_TRITON_ERROR}, got {penalty}"
+    print("✅ test_categorize_error_triton PASSED")
+
+
 def test_categorize_error_unknown():
-    """Test that unknown errors return total failure penalty."""
-    def categorize_error(stderr):
-        if stderr is None:
-            return "unknown", PENALTY_TOTAL_FAILURE
-        
-        stderr_lower = stderr.lower()
-        
-        if "out of resource: shared memory" in stderr_lower:
-            return "shared_memory", PENALTY_SHARED_MEMORY
-        elif "insufficient registers" in stderr_lower:
-            return "register_overflow", PENALTY_REGISTER_OVERFLOW
-        elif "timeout" in stderr_lower:
-            return "timeout", PENALTY_TIMEOUT
-        elif "cuda out of memory" in stderr_lower or "oom" in stderr_lower:
-            return "cuda_oom", PENALTY_TOTAL_FAILURE
-        else:
-            return "unknown", PENALTY_TOTAL_FAILURE
-    
-    error_type, penalty = categorize_error("Some random error message")
+    """Test that unknown errors are correctly categorized."""
+    error_type, penalty = _categorize_error_for_test("Some completely unrecognized error")
     assert error_type == "unknown", f"Expected unknown, got {error_type}"
     assert penalty == PENALTY_TOTAL_FAILURE, f"Expected {PENALTY_TOTAL_FAILURE}, got {penalty}"
     print("✅ test_categorize_error_unknown PASSED")
 
 
 def test_categorize_error_none():
-    """Test that None stderr returns unknown with total failure penalty."""
-    def categorize_error(stderr):
-        if stderr is None:
-            return "unknown", PENALTY_TOTAL_FAILURE
-        
-        stderr_lower = stderr.lower()
-        
-        if "out of resource: shared memory" in stderr_lower:
-            return "shared_memory", PENALTY_SHARED_MEMORY
-        elif "insufficient registers" in stderr_lower:
-            return "register_overflow", PENALTY_REGISTER_OVERFLOW
-        elif "timeout" in stderr_lower:
-            return "timeout", PENALTY_TIMEOUT
-        elif "cuda out of memory" in stderr_lower or "oom" in stderr_lower:
-            return "cuda_oom", PENALTY_TOTAL_FAILURE
-        else:
-            return "unknown", PENALTY_TOTAL_FAILURE
-    
-    error_type, penalty = categorize_error(None)
+    """Test that None stderr is handled correctly."""
+    error_type, penalty = _categorize_error_for_test(None)
     assert error_type == "unknown", f"Expected unknown, got {error_type}"
     assert penalty == PENALTY_TOTAL_FAILURE, f"Expected {PENALTY_TOTAL_FAILURE}, got {penalty}"
     print("✅ test_categorize_error_none PASSED")
@@ -480,6 +411,7 @@ if __name__ == "__main__":
     test_categorize_error_register_overflow()
     test_categorize_error_timeout()
     test_categorize_error_cuda_oom()
+    test_categorize_error_triton()
     test_categorize_error_unknown()
     test_categorize_error_none()
     

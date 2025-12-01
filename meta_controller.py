@@ -34,11 +34,18 @@ DEFAULT_MISSION_PLAN = {
     "pruned_action_space": DEFAULT_OPTIMIZATION_POLICY["search_space"]
 }
 
-# Default token counts to test (matching vLLM's expected format)
-DEFAULT_TOKEN_COUNTS = [
-    1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024, 
-    1536, 2048, 3072, 4096
+# Token counts for training (key representative values for 5-hour run)
+TOKEN_COUNTS_TRAINING = [1, 16, 64, 256, 1024, 4096, 16384]
+
+# All token counts that vLLM expects (for final export with interpolation)
+TOKEN_COUNTS_ALL = [
+    1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024,
+    1536, 2048, 3072, 4096, 5120, 9216, 13312, 17408,
+    25600, 33792, 41984, 50176, 58368
 ]
+
+# Default token counts to test (matching vLLM's expected format)
+DEFAULT_TOKEN_COUNTS = TOKEN_COUNTS_TRAINING
 
 # Minimum training steps per token count to ensure meaningful exploration
 MIN_STEPS_PER_TOKEN = 8  # Reduced from 10 for faster iteration
@@ -82,6 +89,23 @@ class MetaControllerReward:
         self.static_args = static_args
         self.config_exporter = config_exporter
         self.token_counts = token_counts or DEFAULT_TOKEN_COUNTS
+        self.num_experts = static_args.get('num_experts', 128)
+        self.inter_size = static_args.get('inter_size', 1536)
+        
+        # Set up vLLM config directory
+        try:
+            import vllm
+            vllm_lib_path = os.path.dirname(vllm.__file__)
+            self.vllm_config_dir = os.path.join(
+                vllm_lib_path, "model_executor/layers/fused_moe/configs/"
+            )
+            if not os.path.exists(self.vllm_config_dir):
+                self.vllm_config_dir = "/tmp/vllm_configs/"
+            os.makedirs(self.vllm_config_dir, exist_ok=True)
+        except Exception:
+            self.vllm_config_dir = "/tmp/vllm_configs/"
+            os.makedirs(self.vllm_config_dir, exist_ok=True)
+        
         print(f"[MetaController] Requesting ProfilingWorker for PHYSICAL GPU {profiling_gpu_id}")
         self.worker = ProfilingWorker.options(num_gpus=1).remote(profiling_gpu_id)
         self.initial_state = self._get_initial_state()
@@ -528,9 +552,10 @@ class MetaControllerReward:
         ss["num_warps"] = [w for w in ss["num_warps"] if w in POWER_OF_TWO_WARPS] or [4]
         
         # H100 hardware constraint validation - clamp values to safe limits
+        # Aggressive: Allow num_stages=5 for pushing boundaries!
         H100_BLOCK_SIZE_MN_LIMIT = 128
         H100_BLOCK_SIZE_K_LIMIT = 64
-        H100_NUM_STAGES_LIMIT = 4
+        H100_NUM_STAGES_LIMIT = 5  # Increased from 4 for aggressive testing
         
         ss["BLOCK_SIZE_M"] = [min(v, H100_BLOCK_SIZE_MN_LIMIT) for v in ss["BLOCK_SIZE_M"]]
         ss["BLOCK_SIZE_N"] = [min(v, H100_BLOCK_SIZE_MN_LIMIT) for v in ss["BLOCK_SIZE_N"]]
@@ -636,6 +661,47 @@ class MetaControllerReward:
             best = min(valid) if valid else 0.0
         print(f"[MetaController] Throughput validation complete. Best metric: {best}")
         return best
+
+    def _run_slow_gym_validation(self, best_configs_by_token):
+        """
+        Run vLLM benchmark with a COMBINED config file containing all token counts.
+        
+        Args:
+            best_configs_by_token: Dict mapping token_count -> {"config": {...}, "reward": float}
+            
+        Returns:
+            float: Throughput metric from vLLM benchmark
+        """
+        if not best_configs_by_token:
+            print("[MetaController] No configs to validate.")
+            return 0.0
+        
+        # Build combined config with ALL token counts
+        combined_config = {}
+        for token_count, config_data in best_configs_by_token.items():
+            combined_config[str(token_count)] = config_data["config"]
+        
+        # Write the combined config ONCE
+        config_path = os.path.join(
+            self.vllm_config_dir,
+            f"E={self.num_experts},N={self.inter_size},device_name=NVIDIA_H100_80GB_HBM3.json"
+        )
+        
+        with open(config_path, "w") as f:
+            json.dump(combined_config, f, indent=2)
+        
+        print(f"[MetaController] Wrote combined config with {len(combined_config)} token counts to: {config_path}")
+        
+        # Now run vLLM benchmark ONCE (it will use the right config per token count internally)
+        result = self.worker.run_throughput_validation.remote(
+            combined_config,
+            self.model_name,
+            self.user_goal
+        )
+        
+        throughput = ray.get(result)
+        print(f"[MetaController] Combined config validation throughput: {throughput} tokens/sec")
+        return throughput
 
     def _run_slow_gym(self, top_configs):
         """Legacy method for backward compatibility."""

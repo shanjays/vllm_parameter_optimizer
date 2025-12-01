@@ -217,6 +217,81 @@ def test_multiple_token_counts():
     print("✅ test_multiple_token_counts PASSED")
 
 
+def test_export_complete_config_interpolation():
+    """Test that export_complete_config interpolates missing token counts."""
+    exporter = VLLMConfigExporter(num_experts=128, inter_size=1536)
+    
+    # Add configs for only a few token counts
+    test_configs = [
+        (1, {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 32}),
+        (64, {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64}),
+        (1024, {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128}),
+    ]
+    for tc, config in test_configs:
+        exporter.update_best_config(tc, config, reward=50.0)
+    
+    # Export complete config
+    temp_dir = tempfile.mkdtemp()
+    try:
+        output_path = os.path.join(temp_dir, "complete_config.json")
+        result_path = exporter.export_complete_config(output_path)
+        
+        assert result_path is not None, "Should return path on success"
+        assert os.path.exists(output_path), "Output file should exist"
+        
+        with open(output_path, 'r') as f:
+            complete_config = json.load(f)
+        
+        # Check that all expected token counts are present
+        from config_exporter import TOKEN_COUNTS_ALL
+        assert len(complete_config) == len(TOKEN_COUNTS_ALL), f"Should have {len(TOKEN_COUNTS_ALL)} entries"
+        
+        # Check interpolation worked
+        assert "2" in complete_config, "Token count 2 should be interpolated"
+        assert "128" in complete_config, "Token count 128 should be interpolated"
+        assert "4096" in complete_config, "Token count 4096 should be interpolated"
+        
+        print("✅ test_export_complete_config_interpolation PASSED")
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_find_nearest_config():
+    """Test the _find_nearest_config helper method."""
+    exporter = VLLMConfigExporter(num_experts=128, inter_size=1536)
+    
+    tested_counts = [1, 16, 64, 256, 1024]
+    
+    # Test exact match
+    assert exporter._find_nearest_config(16, tested_counts) == 16
+    
+    # Test value between two tested counts (should prefer lower)
+    assert exporter._find_nearest_config(32, tested_counts) == 16
+    
+    # Test value higher than all tested
+    assert exporter._find_nearest_config(5000, tested_counts) == 1024
+    
+    # Test value lower than all tested
+    assert exporter._find_nearest_config(0, tested_counts) == 1
+    
+    print("✅ test_find_nearest_config PASSED")
+
+
+def test_all_token_counts_constant():
+    """Test that TOKEN_COUNTS_ALL is properly defined."""
+    from config_exporter import TOKEN_COUNTS_ALL
+    
+    # Should have the expected vLLM token counts
+    assert 1 in TOKEN_COUNTS_ALL, "Should include 1"
+    assert 4096 in TOKEN_COUNTS_ALL, "Should include 4096"
+    assert len(TOKEN_COUNTS_ALL) >= 20, "Should have many token counts"
+    
+    # Should be sorted
+    assert TOKEN_COUNTS_ALL == sorted(TOKEN_COUNTS_ALL), "Should be sorted"
+    
+    print("✅ test_all_token_counts_constant PASSED")
+
+
 if __name__ == "__main__":
     print("--- CONFIG EXPORTER TESTS ---\n")
     
@@ -234,6 +309,11 @@ if __name__ == "__main__":
     print("\n=== Config Saving Tests ===")
     test_save_vllm_config()
     test_save_vllm_config_sorted_keys()
+    
+    print("\n=== Complete Config Export Tests ===")
+    test_export_complete_config_interpolation()
+    test_find_nearest_config()
+    test_all_token_counts_constant()
     
     print("\n=== Summary Tests ===")
     test_get_summary()
