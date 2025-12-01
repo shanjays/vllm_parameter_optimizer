@@ -125,20 +125,22 @@ class VLLMConfigExporter:
                 with open(config_path, 'r') as f:
                     existing_config = json.load(f)
                 # Load existing best configs and rewards
+                # Use float('-inf') as sentinel for untested configs
                 for tc_str, config in existing_config.items():
                     self.best_configs[tc_str] = config
-                    self.best_rewards[tc_str] = 0.0
+                    self.best_rewards[tc_str] = float('-inf')
                 print(f"[ConfigExporter] Loaded existing config with {len(existing_config)} token counts from {config_path}")
                 return
             except (json.JSONDecodeError, ValueError) as e:
                 print(f"[ConfigExporter] Could not parse existing config: {e}, creating new")
         
         # Create default config for all token counts
+        # Use float('-inf') as sentinel for untested configs
         default_config = {}
         for tc in TOKEN_COUNTS_ALL:
             default_config[str(tc)] = self.DEFAULT_KERNEL_CONFIG.copy()
             self.best_configs[str(tc)] = self.DEFAULT_KERNEL_CONFIG.copy()
-            self.best_rewards[str(tc)] = 0.0
+            self.best_rewards[str(tc)] = float('-inf')
         
         # Write to vLLM config directory
         try:
@@ -326,13 +328,13 @@ class VLLMConfigExporter:
     
     def get_summary(self):
         """Get summary of best configs found."""
-        # Only count token counts that have been tested with reward > 0
-        tested_token_counts = len([tc for tc, r in self.best_rewards.items() if r > 0])
+        # Only count token counts that have been actually tested (reward > -inf)
+        tested_token_counts = len([tc for tc, r in self.best_rewards.items() if r > float('-inf')])
         return {
             "total_token_counts": len(self.best_configs),
             "total_experiments": len(self.all_results),
             "tested_token_counts": tested_token_counts,
-            "best_rewards": {tc: r for tc, r in self.best_rewards.items() if r > 0},
+            "best_rewards": {tc: r for tc, r in self.best_rewards.items() if r > float('-inf')},
             "config_filename": self.get_config_filename(),
             "config_path": os.path.join(self.vllm_config_dir, self.config_filename)
         }
