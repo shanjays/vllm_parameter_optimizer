@@ -373,7 +373,7 @@ class ProfilingWorker:
 
         static_args = {
             "num_experts": 128,
-            "inter_size": 1536,
+            "inter_size": 768,
         }
         E = static_args['num_experts']    
         N = static_args['inter_size']
@@ -481,4 +481,5 @@ class ProfilingWorker:
 
 # Backward compatibility alias
 BenchmarkWorker = ProfilingWorker
+
 
