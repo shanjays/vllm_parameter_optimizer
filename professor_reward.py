@@ -23,6 +23,9 @@ MIN_STEPS_PER_TOKEN = 8  # Reduced from 10 for faster iteration
 # Number of top results to collect per token count
 RESULTS_PER_TOKEN = 3
 
+# Validation frequency: run vLLM validation after every N token counts
+VALIDATE_EVERY_N_TOKENS = 3
+
 class HAKT_Reward_Function:
     def __init__(self, user_goal, model_name, fast_loop_steps, worker_gpu_id, static_args, 
                  config_saver=None, token_counts=None):
@@ -92,6 +95,17 @@ class HAKT_Reward_Function:
                 rewards.append(0.0)
                 if not valid:
                     self._run_default_penalty_plan(i)
+        
+        # Print training summary
+        if self.config_saver:
+            summary = self.config_saver.get_summary()
+            print(f"\n[RewardFn] === Training Summary ===")
+            print(f"  Total configs tested: {summary['total_experiments']}")
+            print(f"  Token counts covered: {summary['total_token_counts']}")
+            print(f"  Best rewards by token count:")
+            for tc, reward in sorted(summary['best_rewards'].items(), key=lambda x: int(x[0])):
+                print(f"    {tc} tokens: {reward:.2f}")
+        
         return rewards
 
     def _run_default_penalty_plan(self, idx):
@@ -186,9 +200,28 @@ class HAKT_Reward_Function:
             json_str = param_match.group(1).strip()
             print("[RewardFn] Found content within <param> tags.")
         else:
+            # Fallback: Try to find JSON-like content after <param> (for truncated output)
+            param_start_match = re.search(r'<param>\s*(\{.*)', llm_output_str, re.DOTALL | re.IGNORECASE)
+            if param_start_match:
+                json_str = param_start_match.group(1).strip()
+                print("[RewardFn] Found truncated content after <param> tag, attempting recovery.")
+                # Try to fix truncated JSON
+                fixed = self._fix_truncated_json(json_str)
+                if fixed is not None:
+                    return fixed
+            
             # Fallback to brace matching
             match = re.search(r'(\{.*\})', llm_output_str, re.DOTALL)
             if not match:
+                # Try to recover from truncated output without closing brace
+                match_partial = re.search(r'(\{.*)', llm_output_str, re.DOTALL)
+                if match_partial:
+                    json_str = match_partial.group(1).strip()
+                    print("[RewardFn] Found partial JSON, attempting recovery.")
+                    fixed = self._fix_truncated_json(json_str)
+                    if fixed is not None:
+                        return fixed
+                
                 salvage = self._try_salvage_plan(llm_output_str)
                 if salvage is not None:
                     return salvage
@@ -253,6 +286,38 @@ class HAKT_Reward_Function:
                     return ast.literal_eval(normalized)
                 except Exception:
                     return self._default_safe_plan()
+
+    def _fix_truncated_json(self, json_str):
+        """Attempt to fix truncated JSON by adding missing brackets."""
+        # Count brackets
+        open_braces = json_str.count('{')
+        close_braces = json_str.count('}')
+        open_brackets = json_str.count('[')
+        close_brackets = json_str.count(']')
+
+        # Strip trailing whitespace
+        json_str = json_str.rstrip()
+        
+        # Remove trailing comma if present
+        if json_str.endswith(','):
+            json_str = json_str[:-1]
+
+        # Add missing array closures
+        for _ in range(open_brackets - close_brackets):
+            json_str += ']'
+
+        # Add missing object closures
+        for _ in range(open_braces - close_braces):
+            json_str += '}'
+
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            # Try Python literal eval
+            try:
+                return ast.literal_eval(json_str)
+            except Exception:
+                return None
 
     def _default_safe_plan(self):
         return {
@@ -382,12 +447,14 @@ class HAKT_Reward_Function:
     def _run_fast_loop(self, mission_plan_path):
         """Run fast loop for EACH token count."""
         all_top_results = []
+        best_configs_for_validation = []
+        total_tokens = len(self.token_counts)
         
         # Calculate steps per token count
         steps_per_token = max(MIN_STEPS_PER_TOKEN, self.fast_loop_steps // len(self.token_counts))
         
-        for token_count in self.token_counts:
-            print(f"[RewardFn] Testing token count: {token_count}")
+        for i, token_count in enumerate(self.token_counts):
+            print(f"\n[RewardFn] === Token Count {i+1}/{total_tokens}: {token_count} tokens ===")
             
             env = FastGymEnv(
                 mission_plan_path=mission_plan_path,
@@ -410,6 +477,7 @@ class HAKT_Reward_Function:
                 top = env.get_top_results(n=RESULTS_PER_TOKEN)
                 print(f"[RewardFn] Token count {token_count}: Found {len(top)} results.")
                 all_top_results.extend(top)
+                best_configs_for_validation.extend(top)
             # --- END FIX ---
             finally:
                 if pilot:
@@ -420,6 +488,14 @@ class HAKT_Reward_Function:
                     os.environ.pop("CUDA_VISIBLE_DEVICES", None)
                 else:
                     os.environ["CUDA_VISIBLE_DEVICES"] = prev_cuda
+            
+            # Periodic validation
+            if (i + 1) % VALIDATE_EVERY_N_TOKENS == 0 and best_configs_for_validation:
+                print(f"[RewardFn] Running periodic vLLM validation after {i+1} token counts...")
+                best_config = max(best_configs_for_validation, key=lambda x: x[2])
+                throughput = self._run_slow_gym([best_config])
+                print(f"[RewardFn] Periodic validation throughput: {throughput} tokens/sec")
+                best_configs_for_validation = []
         
         # Return combined top results from all token counts
         if all_top_results:

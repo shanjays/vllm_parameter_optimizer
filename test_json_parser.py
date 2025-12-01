@@ -172,6 +172,59 @@ NUMBER_CLEANING_TEST_CASES = [
     ("2.5e-3", "2.5e-3"),
 ]
 
+# =========================================================================
+# --- Test Cases for truncated JSON recovery ---
+# =========================================================================
+def _fix_truncated_json(json_str):
+    """Attempt to fix truncated JSON by adding missing brackets."""
+    # Count brackets
+    open_braces = json_str.count('{')
+    close_braces = json_str.count('}')
+    open_brackets = json_str.count('[')
+    close_brackets = json_str.count(']')
+
+    # Strip trailing whitespace
+    json_str = json_str.rstrip()
+    
+    # Remove trailing comma if present
+    if json_str.endswith(','):
+        json_str = json_str[:-1]
+
+    # Add missing array closures
+    for _ in range(open_brackets - close_brackets):
+        json_str += ']'
+
+    # Add missing object closures
+    for _ in range(open_braces - close_braces):
+        json_str += '}'
+
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        # Try Python literal eval
+        try:
+            return ast.literal_eval(json_str)
+        except Exception:
+            return None
+
+TRUNCATED_JSON_TEST_CASES = [
+    # Truncated after opening braces
+    (
+        '{"reward_function": {"R_sm_throughput": 0.6, "R_dram_throughput": 0.2, "R_l1_hit_rate": 0.1, "R_l2_hit_rate": 0.1}, "pruned_action_space": {"BLOCK_SIZE_M": [64, 128], "BLOCK_SIZE_N": [64',
+        "Truncated mid-array"
+    ),
+    # Truncated with trailing comma
+    (
+        '{"reward_function": {"R_sm_throughput": 0.5, "R_dram_throughput": 0.3},',
+        "Truncated with trailing comma"
+    ),
+    # Missing final closing brace
+    (
+        '{"reward_function": {"R_sm_throughput": 0.5, "R_dram_throughput": 0.3, "R_l1_hit_rate": 0.1, "R_l2_hit_rate": 0.1}',
+        "Missing final closing brace"
+    ),
+]
+
 
 if __name__ == "__main__":
     print("--- HAKT JSON PARSER CORE LOGIC TEST ---")
@@ -207,6 +260,18 @@ if __name__ == "__main__":
             print(f"✅ _clean_number_string('{input_val}') = '{result}'")
         else:
             print(f"❌ _clean_number_string('{input_val}') = '{result}', expected '{expected}'")
+            all_passed = False
+
+    # Test truncated JSON recovery
+    print("\n--- TRUNCATED JSON RECOVERY TESTS ---")
+    for input_str, test_name in TRUNCATED_JSON_TEST_CASES:
+        print(f"\n--- Testing: {test_name} ---")
+        print(f"Input Sample: {input_str[:60]}...")
+        result = _fix_truncated_json(input_str)
+        if result is not None:
+            print(f"✅ Successfully recovered JSON: {list(result.keys())}")
+        else:
+            print(f"❌ Failed to recover truncated JSON")
             all_passed = False
 
     print("\n" + "="*60)
