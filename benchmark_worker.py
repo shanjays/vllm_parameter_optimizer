@@ -14,6 +14,13 @@ DEFAULT_CONFIG = {
     "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4,
 }
 
+# Error penalty constants for different failure types
+PENALTY_SHARED_MEMORY = -50.0
+PENALTY_REGISTER_OVERFLOW = -75.0
+PENALTY_TIMEOUT = -75.0
+PENALTY_PARSE_ERROR = -25.0
+PENALTY_TOTAL_FAILURE = -100.0
+
 @ray.remote(num_gpus=1) # This actor requires 1 GPU from Ray's pool
 class BenchmarkWorker:
     def __init__(self, gpu_id):
@@ -21,6 +28,8 @@ class BenchmarkWorker:
         pid = os.getpid()
         self.ncu_log_path = f"/tmp/hakt_ncu_log_gpu{self.gpu_id}_{pid}.csv"
         self.temp_config_path = f"/tmp/hakt_temp_config_gpu{self.gpu_id}_{pid}.json"
+        self.failed_configs = []  # Track failed configs for analysis
+        self.max_retries = 2  # Number of retries before giving up
         
         try:
             import vllm
@@ -71,17 +80,90 @@ class BenchmarkWorker:
             return False
         return True
 
+    def _reduce_config(self, config):
+        """
+        Try to reduce config to fit within hardware limits.
+        Returns reduced config or None if can't reduce further.
+        """
+        reduced = config.copy()
+        
+        # Try reducing in order of impact
+        reductions = [
+            ('num_stages', lambda x: max(2, x - 1)),
+            ('BLOCK_SIZE_M', lambda x: max(16, x // 2)),
+            ('BLOCK_SIZE_K', lambda x: max(32, x // 2)),
+            ('BLOCK_SIZE_N', lambda x: max(32, x // 2)),
+        ]
+        
+        for key, reduce_fn in reductions:
+            if key in reduced and reduced[key] > reduce_fn(reduced[key]):
+                old_val = reduced[key]
+                reduced[key] = reduce_fn(reduced[key])
+                print(f"[BenchmarkWorker] Reduced {key}: {old_val} -> {reduced[key]}")
+                
+                if self._validate_triton_config(reduced):
+                    return reduced
+        
+        return None  # Can't reduce further
+    
+    def _categorize_error(self, stderr):
+        """Categorize error type from stderr output."""
+        if stderr is None:
+            return "unknown", PENALTY_TOTAL_FAILURE
+        
+        stderr_lower = stderr.lower()
+        
+        if "out of resource: shared memory" in stderr_lower:
+            return "shared_memory", PENALTY_SHARED_MEMORY
+        elif "insufficient registers" in stderr_lower:
+            return "register_overflow", PENALTY_REGISTER_OVERFLOW
+        elif "timeout" in stderr_lower:
+            return "timeout", PENALTY_TIMEOUT
+        elif "cuda out of memory" in stderr_lower or "oom" in stderr_lower:
+            return "cuda_oom", PENALTY_TOTAL_FAILURE
+        else:
+            return "unknown", PENALTY_TOTAL_FAILURE
+    
+    def _log_failed_config(self, config, error_type, error_msg):
+        """Log failed config for analysis."""
+        self.failed_configs.append({
+            'config': config.copy(),
+            'error_type': error_type,
+            'error_msg': str(error_msg)[:200],  # Truncate long messages
+            'timestamp': time.time()
+        })
+        
+        # Keep only last 100 failures to avoid memory bloat
+        if len(self.failed_configs) > 100:
+            self.failed_configs = self.failed_configs[-100:]
+    
+    def get_failure_stats(self):
+        """Return statistics about failed configs."""
+        if not self.failed_configs:
+            return {"total_failures": 0}
+        
+        error_counts = {}
+        for failure in self.failed_configs:
+            error_type = failure['error_type']
+            error_counts[error_type] = error_counts.get(error_type, 0) + 1
+        
+        return {
+            "total_failures": len(self.failed_configs),
+            "by_type": error_counts,
+            "recent_failures": self.failed_configs[-5:]
+        }
+
     def run_fast_gym_benchmark(self, params_dict, static_args, reward_weights):
         """
-        Runs the 'Fast Gym' (ncu) on this worker's GPU (GPU 1).
+        Runs the 'Fast Gym' (ncu) on this worker's GPU.
         Returns (state, reward, csv_data)
+        
+        Includes retry logic and automatic config reduction.
         """
         
-        # --- FIX for GROUP_SIZE_M error ---
         config_to_use = DEFAULT_CONFIG.copy()
         if params_dict:
             config_to_use.update(params_dict)
-        # --- END FIX ---
         
         # Validate num_warps is a power of 2
         num_warps = config_to_use.get('num_warps', 4)
@@ -89,92 +171,122 @@ class BenchmarkWorker:
             print(f"[BenchmarkWorker] WARNING: Invalid num_warps={num_warps}, using 4")
             config_to_use['num_warps'] = 4
         
-        # Validate config fits H100 shared memory before running NCU
+        # Pre-flight validation with automatic reduction
         if not self._validate_triton_config(config_to_use):
-            print(f"[BenchmarkWorker] Returning penalty for invalid config")
-            return None, -100.0, None
+            print(f"[BenchmarkWorker] Config exceeds limits, attempting reduction...")
+            reduced_config = self._reduce_config(config_to_use)
             
-        with open(self.temp_config_path, "w") as f:
-            json.dump(config_to_use, f)
-
-        ncu_command = [
-            "ncu", "--csv",
-            "--kernel-name", static_args['kernel_name'], 
-            "--metrics", "sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed,lts__t_sector_hit_rate.pct,l1tex__t_sector_hit_rate.pct",
-            "--target-processes", "all",
-            "--force-overwrite",
-            "--log-file", self.ncu_log_path,
-        ]
-
-        python_command = [
-            "python", static_args['run_script_path'],
-            "--config-path", self.temp_config_path,
-            "--num-experts", str(static_args['num_experts']),
-            "--top-k", str(static_args['top_k']),
-            "--hidden-size", str(static_args['hidden_size']),
-            "--inter-size", str(static_args['inter_size']),
-            "--num-tokens", str(static_args['num_tokens']),
-            "--dtype", static_args['dtype'],
-            "--num-iters", str(static_args['num_iters']),
-            "--num-warmup-iters", "1", 
-        ]
+            if reduced_config is None:
+                print(f"[BenchmarkWorker] Cannot reduce config further, returning penalty")
+                self._log_failed_config(config_to_use, "shared_memory", "Config exceeds limits and cannot be reduced")
+                return None, PENALTY_SHARED_MEMORY, None
+            
+            config_to_use = reduced_config
+            print(f"[BenchmarkWorker] Using reduced config: {config_to_use}")
         
-        full_command = ncu_command + python_command
-        env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id) 
+        # Retry loop
+        last_error = None
+        last_stderr = None
+        
+        for attempt in range(self.max_retries):
+            if attempt > 0:
+                print(f"[BenchmarkWorker] Retry attempt {attempt + 1}/{self.max_retries}")
+                time.sleep(1)  # Brief pause between retries
+            
+            with open(self.temp_config_path, "w") as f:
+                json.dump(config_to_use, f)
 
-        try:
-            subprocess.run(full_command, check=True, capture_output=True, text=True, timeout=30, env=env)
-        except subprocess.CalledProcessError as e:
-            print(f"[BenchmarkWorker] ERROR: NCU run failed on GPU {self.gpu_id}. STDERR:\n{e.stderr}")
-            return None, -100.0, None 
-        except subprocess.TimeoutExpired:
-            print(f"[BenchmarkWorker] ERROR: NCU run timed out on GPU {self.gpu_id}.")
-            return None, -100.0, None
+            ncu_command = [
+                "ncu", "--csv",
+                "--kernel-name", static_args['kernel_name'], 
+                "--metrics", "sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed,lts__t_sector_hit_rate.pct,l1tex__t_sector_hit_rate.pct",
+                "--target-processes", "all",
+                "--force-overwrite",
+                "--log-file", self.ncu_log_path,
+            ]
 
-        # --- THIS IS THE FIX: Robust "Long Format" CSV Parsing ---
+            python_command = [
+                "python", static_args['run_script_path'],
+                "--config-path", self.temp_config_path,
+                "--num-experts", str(static_args['num_experts']),
+                "--top-k", str(static_args['top_k']),
+                "--hidden-size", str(static_args['hidden_size']),
+                "--inter-size", str(static_args['inter_size']),
+                "--num-tokens", str(static_args['num_tokens']),
+                "--dtype", static_args['dtype'],
+                "--num-iters", str(static_args['num_iters']),
+                "--num-warmup-iters", "1", 
+            ]
+            
+            full_command = ncu_command + python_command
+            env = os.environ.copy()
+            env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id) 
+
+            try:
+                subprocess.run(
+                    full_command, 
+                    check=True, 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=60,  # Increased timeout
+                    env=env
+                )
+                # Success! Break out of retry loop
+                break
+                
+            except subprocess.CalledProcessError as e:
+                last_error = e
+                last_stderr = e.stderr
+                error_type, penalty = self._categorize_error(e.stderr)
+                print(f"[BenchmarkWorker] NCU failed (attempt {attempt + 1}): {error_type}")
+                
+                # Don't retry for config-related errors
+                if error_type in ["shared_memory", "register_overflow"]:
+                    self._log_failed_config(config_to_use, error_type, e.stderr)
+                    return None, penalty, None
+                    
+            except subprocess.TimeoutExpired as e:
+                last_error = e
+                last_stderr = "Timeout expired"
+                print(f"[BenchmarkWorker] NCU timed out (attempt {attempt + 1})")
+                
+        else:
+            # All retries exhausted
+            error_type, penalty = self._categorize_error(last_stderr)
+            print(f"[BenchmarkWorker] All retries exhausted. Error type: {error_type}")
+            self._log_failed_config(config_to_use, error_type, str(last_error))
+            return None, penalty, None
+
+        # Parse NCU output
         try:
             csv_data = ""
-            # We will group metrics by Kernel Name and Invocation ID
-            # Ex: { "fused_moe_kernel_1": {'sm': 10.0, 'dram': 20.0, ...} }
             kernel_invocations = {}
-            
             clean_csv_lines = []
             header_found = False
 
             with open(self.ncu_log_path, 'r') as f:
                 for line in f:
-                    csv_data += line # Store all data for the reward fn
-                    
-                    # 1. Find the real header row, skipping garbage lines
+                    csv_data += line
                     if not header_found and line.strip().startswith('"ID"'):
                         header_found = True
-                    
-                    # 2. Once header is found, append all subsequent lines
                     if header_found:
                         clean_csv_lines.append(line)
                 
             if not header_found:
-                raise Exception("NCU ran but did not produce a valid CSV header (no 'ID' row found).")
+                raise Exception("NCU ran but did not produce a valid CSV header")
 
-            # 3. Process the *clean* CSV data
             csv_reader = csv.DictReader(clean_csv_lines)
             
             for row in csv_reader:
                 try:
-                    # Create a unique ID for each kernel invocation
                     invocation_key = f"{row['Kernel Name']}_{row['ID']}"
-                    
                     if invocation_key not in kernel_invocations:
                         kernel_invocations[invocation_key] = {}
                     
-                    # Store the metric value
                     metric_name = row['Metric Name']
-                    # This is where the 'NoneType' error happened.
-                    # We add a check for None before calling .replace()
                     metric_value_str = row.get('Metric Value')
                     if metric_value_str is None:
-                        continue # Skip this malformed row
+                        continue
                         
                     metric_value = float(metric_value_str.replace('%', '').strip())
                     
@@ -187,25 +299,19 @@ class BenchmarkWorker:
                     elif metric_name == 'lts__t_sector_hit_rate.pct':
                         kernel_invocations[invocation_key]['l2'] = metric_value
                         
-                except (KeyError, ValueError, TypeError) as e:
-                    # This warning is normal for garbage lines that slip through
-                    # print(f"[BenchmarkWorker] WARNING: Skipping malformed/unexpected NCU row. Error: {e}. Row: {row}")
+                except (KeyError, ValueError, TypeError):
                     continue
             
-            # 4. Now, aggregate the metrics from all valid invocations
             metrics = {'sm': [], 'dram': [], 'l1': [], 'l2': []}
             for invocation in kernel_invocations.values():
-                # Only count *complete* data points
                 if all(k in invocation for k in ['sm', 'dram', 'l1', 'l2']):
                     metrics['sm'].append(invocation['sm'])
                     metrics['dram'].append(invocation['dram'])
                     metrics['l1'].append(invocation['l1'])
                     metrics['l2'].append(invocation['l2'])
             
-            if not metrics['sm']: # Check if we found any valid, complete invocations
-                raise Exception(f"NCU ran but found 0 *complete* kernel metric sets matching '{static_args['kernel_name']}'.")
-            
-            # --- END FIX ---
+            if not metrics['sm']:
+                raise Exception(f"NCU found 0 complete kernel metric sets")
 
             state = np.array([
                 np.mean(metrics['sm']),
@@ -218,8 +324,9 @@ class BenchmarkWorker:
             return state, reward, csv_data
 
         except Exception as e:
-            print(f"[BenchmarkWorker] ERROR: NCU CSV parsing failed on GPU {self.gpu_id}. {e}")
-            return None, -100.0, None
+            print(f"[BenchmarkWorker] ERROR: NCU CSV parsing failed. {e}")
+            self._log_failed_config(config_to_use, "parse_error", str(e))
+            return None, PENALTY_PARSE_ERROR, None
 
     def _calculate_reward(self, state, reward_weights):
         sm, dram, l1, l2 = state
