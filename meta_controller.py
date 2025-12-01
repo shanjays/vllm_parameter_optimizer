@@ -617,7 +617,7 @@ class MetaControllerReward:
                     log_dir=log_dir, 
                     device="cpu",
                     load_existing=True,  # Load trained model if exists!
-                    training_logger=getattr(self, 'training_logger', None),
+                    training_logger=self.training_logger,
                 )
                 agent.train_epoch(steps=steps_per_token)
                 top = env.get_top_results(n=RESULTS_PER_TOKEN)
