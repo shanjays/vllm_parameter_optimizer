@@ -27,10 +27,9 @@ WORKER_GPU_ID = 7
 # These represent different token batch sizes that the fused_moe kernel
 # will encounter during inference. The optimal kernel config varies based
 # on how many tokens are being processed.
+# Reduced from 27 to 6 for faster testing - each NCU run takes ~30 seconds
 TOKEN_COUNTS_TO_TEST = [
-    1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024, 
-    1536, 2048, 3072, 4096, 5120, 9216, 13312, 17408, 
-    25600, 33792, 41984, 50176, 58368
+    1, 16, 64, 256, 1024, 4096
 ]
 
 # --- THIS IS THE FIX ---
@@ -44,7 +43,7 @@ USER_GOAL = "throughput"
 MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507"
 KERNEL_TO_TUNE = "fused_moe_kernel"
 RUN_SCRIPT_PATH = "run_moe_gym.py"
-FAST_LOOP_STEPS = 100
+FAST_LOOP_STEPS = 20  # Each step = 1 NCU run (~30 sec), so 20 steps = ~10 minutes
 LLM_TRAIN_STEPS = 50
 
 STATIC_ARGS_FOR_HAKT = {
