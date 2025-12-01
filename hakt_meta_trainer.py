@@ -18,9 +18,20 @@ from transformers import AutoTokenizer
 from trl import GRPOTrainer, GRPOConfig
 
 from professor_reward import HAKT_Reward_Function
+from config_saver import VLLMConfigSaver
 
 AGENT_GPU_ID = 0
 WORKER_GPU_ID = 7
+
+# Token counts to test (matching vLLM's expected format)
+# These represent different token batch sizes that the fused_moe kernel
+# will encounter during inference. The optimal kernel config varies based
+# on how many tokens are being processed.
+TOKEN_COUNTS_TO_TEST = [
+    1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024, 
+    1536, 2048, 3072, 4096, 5120, 9216, 13312, 17408, 
+    25600, 33792, 41984, 50176, 58368
+]
 
 # --- THIS IS THE FIX ---
 # We must use an Unsloth-optimized model name.
@@ -259,13 +270,22 @@ Analyze the NCU metrics and generate an optimized mission plan for the {KERNEL_T
 
     dataset = Dataset.from_list([{"prompt": professor_prompt}] * LLM_TRAIN_STEPS)
 
+    # Create config saver for vLLM format export
+    config_saver = VLLMConfigSaver(
+        num_experts=STATIC_ARGS_FOR_HAKT['num_experts'],
+        inter_size=STATIC_ARGS_FOR_HAKT['inter_size'],
+        device_name="NVIDIA_H100_80GB_HBM3"
+    )
+
     print("[HAKT] Initializing HAKT Reward Function...")
     reward_fn_object = HAKT_Reward_Function(
         user_goal=USER_GOAL,
         model_name=MODEL_NAME,
         fast_loop_steps=FAST_LOOP_STEPS,
         worker_gpu_id=WORKER_GPU_ID,
-        static_args=STATIC_ARGS_FOR_HAKT
+        static_args=STATIC_ARGS_FOR_HAKT,
+        config_saver=config_saver,
+        token_counts=TOKEN_COUNTS_TO_TEST
     )
 
     def hakt_reward_function_wrapper(completions, **kwargs):
@@ -301,6 +321,17 @@ Analyze the NCU metrics and generate an optimized mission plan for the {KERNEL_T
     print("\n--- [HAKT] Starting 'Slow Loop' Training for Professor LLM ---")
     trainer.train()
     print("\n--- [HAKT] Professor LLM fine-tuning complete ---")
+
+    # Save best configs in vLLM format
+    print("\n--- [HAKT] Saving Best Configs ---")
+    vllm_config_path = config_saver.save_vllm_config()
+    
+    # Optionally copy to vLLM installation directory
+    config_saver.copy_to_vllm()
+    
+    # Print summary
+    summary = config_saver.get_summary()
+    print(f"[HAKT] Config Summary: {summary}")
 
     final_model_path = "hakt_professor_final"
     trainer.model.save_pretrained(final_model_path)

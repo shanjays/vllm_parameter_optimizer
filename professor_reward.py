@@ -11,15 +11,31 @@ from benchmark_worker import BenchmarkWorker
 
 POWER_OF_TWO_WARPS = (2, 4, 8, 16, 32)
 
+# Default token counts to test (matching vLLM's expected format)
+DEFAULT_TOKEN_COUNTS = [
+    1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024, 
+    1536, 2048, 3072, 4096
+]
+
+# Minimum training steps per token count to ensure meaningful exploration
+MIN_STEPS_PER_TOKEN = 10
+
+# Number of top results to collect per token count
+RESULTS_PER_TOKEN = 3
+
 class HAKT_Reward_Function:
-    def __init__(self, user_goal, model_name, fast_loop_steps, worker_gpu_id, static_args):
+    def __init__(self, user_goal, model_name, fast_loop_steps, worker_gpu_id, static_args, 
+                 config_saver=None, token_counts=None):
         self.user_goal = user_goal
         self.model_name = model_name
         self.fast_loop_steps = fast_loop_steps
         self.static_args = static_args
+        self.config_saver = config_saver
+        self.token_counts = token_counts or DEFAULT_TOKEN_COUNTS
         print(f"[RewardFn] Requesting BenchmarkWorker for PHYSICAL GPU {worker_gpu_id}")
         self.worker = BenchmarkWorker.options(num_gpus=1).remote(worker_gpu_id)
         self.initial_state = self._get_initial_state()
+        print(f"[RewardFn] Configured to test {len(self.token_counts)} token counts: {self.token_counts[:5]}...")
 
     def _clean_non_json_types(self, data):
         if isinstance(data, dict):
@@ -364,35 +380,54 @@ class HAKT_Reward_Function:
         return {"reward_function": rf, "pruned_action_space": pas}
 
     def _run_fast_loop(self, mission_plan_path):
-        env = FastGymEnv(
-            mission_plan_path=mission_plan_path,
-            benchmark_worker=self.worker,
-            static_args=self.static_args,
-            initial_state=self.initial_state
-        )
-        log_dir = f"./hakt_logs/run_{int(time.time())}/"
-        prev_cuda = os.environ.get("CUDA_VISIBLE_DEVICES")
+        """Run fast loop for EACH token count."""
+        all_top_results = []
         
-        # --- THIS IS THE FIX ---
-        # Hide GPUs for SB3 MLP – force CPU
-        os.environ["CUDA_VISIBLE_DEVICES"] = "" 
-        pilot = None
-        try:
-            pilot = FighterPilot(env, log_dir=log_dir, device="cpu") # Force CPU
-            pilot.train_epoch(steps=self.fast_loop_steps)
-            top = env.get_top_results(n=5)
-            print(f"[RewardFn] Fast Loop completed. Found {len(top)} unique results.")
-            return top
-        # --- END FIX ---
-        finally:
-            if pilot:
-                try: pilot.close()
-                except Exception: pass
-            env.close()
-            if prev_cuda is None:
-                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-            else:
-                os.environ["CUDA_VISIBLE_DEVICES"] = prev_cuda
+        # Calculate steps per token count
+        steps_per_token = max(MIN_STEPS_PER_TOKEN, self.fast_loop_steps // len(self.token_counts))
+        
+        for token_count in self.token_counts:
+            print(f"[RewardFn] Testing token count: {token_count}")
+            
+            env = FastGymEnv(
+                mission_plan_path=mission_plan_path,
+                benchmark_worker=self.worker,
+                static_args=self.static_args,
+                initial_state=self.initial_state,
+                config_saver=self.config_saver,
+                current_token_count=token_count
+            )
+            log_dir = f"./hakt_logs/run_{int(time.time())}_tokens{token_count}/"
+            prev_cuda = os.environ.get("CUDA_VISIBLE_DEVICES")
+            
+            # --- THIS IS THE FIX ---
+            # Hide GPUs for SB3 MLP – force CPU
+            os.environ["CUDA_VISIBLE_DEVICES"] = "" 
+            pilot = None
+            try:
+                pilot = FighterPilot(env, log_dir=log_dir, device="cpu") # Force CPU
+                pilot.train_epoch(steps=steps_per_token)
+                top = env.get_top_results(n=RESULTS_PER_TOKEN)
+                print(f"[RewardFn] Token count {token_count}: Found {len(top)} results.")
+                all_top_results.extend(top)
+            # --- END FIX ---
+            finally:
+                if pilot:
+                    try: pilot.close()
+                    except Exception: pass
+                env.close()
+                if prev_cuda is None:
+                    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+                else:
+                    os.environ["CUDA_VISIBLE_DEVICES"] = prev_cuda
+        
+        # Return combined top results from all token counts
+        if all_top_results:
+            # Sort by reward and return top 5
+            sorted_results = sorted(all_top_results, key=lambda x: x[2], reverse=True)
+            print(f"[RewardFn] Fast Loop completed. Total {len(all_top_results)} results across {len(self.token_counts)} token counts.")
+            return sorted_results[:5]
+        return []
 
     def _run_slow_gym(self, top_configs):
         if not top_configs:

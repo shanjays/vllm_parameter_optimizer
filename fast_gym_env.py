@@ -12,13 +12,16 @@ class FastGymEnv(gym.Env):
     """
     metadata = {'render_modes': []}
 
-    def __init__(self, mission_plan_path, benchmark_worker, static_args, initial_state):
+    def __init__(self, mission_plan_path, benchmark_worker, static_args, initial_state, 
+                 config_saver=None, current_token_count=None):
         super(FastGymEnv, self).__init__()
 
         self.benchmark_worker = benchmark_worker # Ray handle for GPU 1
         self.static_args = static_args
         self.epoch_results = []
         self.initial_state = initial_state
+        self.config_saver = config_saver
+        self.current_token_count = current_token_count or static_args.get('num_tokens', 16088)
         
         # Define the State Space (our 4 ncu metrics)
         # [sm_throughput, dram_throughput, l1_hit_rate, l2_hit_rate]
@@ -88,8 +91,9 @@ class FastGymEnv(gym.Env):
         params = self._action_to_params(action)
         
         # Send the benchmark request to the worker on GPU 1
+        # Pass the current token count for multi-token testing
         result_id = self.benchmark_worker.run_fast_gym_benchmark.remote(
-            params, self.static_args, self.reward_weights
+            params, self.static_args, self.reward_weights, self.current_token_count
         )
         # Wait for the result
         state, reward, csv_data = ray.get(result_id)
@@ -101,6 +105,21 @@ class FastGymEnv(gym.Env):
             # The benchmark worker reported a failure (e.g., OOM, timeout)
             state = self.initial_state # Reset to avoid errors
             # reward is already -100.0 (as set by worker)
+        else:
+            # Update config saver with the result if available
+            if self.config_saver is not None:
+                metrics = {
+                    'sm_throughput': state[0],
+                    'dram_throughput': state[1],
+                    'l1_hit_rate': state[2],
+                    'l2_hit_rate': state[3]
+                }
+                self.config_saver.update_best_config(
+                    self.current_token_count,
+                    params,
+                    reward,
+                    metrics
+                )
         
         # Log this result for the "Professor" to review
         self.epoch_results.append((params, state.tolist(), reward))

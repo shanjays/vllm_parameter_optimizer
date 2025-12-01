@@ -87,87 +87,25 @@ class BenchmarkWorker:
             return False
         return True
 
-    def _reduce_config(self, config):
-        """
-        Try to reduce config to fit within hardware limits.
-        Returns reduced config or None if can't reduce further.
-        """
-        reduced = config.copy()
-        
-        # Try reducing in order of impact
-        reductions = [
-            ('num_stages', lambda x: max(2, x - 1)),
-            ('BLOCK_SIZE_M', lambda x: max(16, x // 2)),
-            ('BLOCK_SIZE_K', lambda x: max(32, x // 2)),
-            ('BLOCK_SIZE_N', lambda x: max(32, x // 2)),
-        ]
-        
-        for key, reduce_fn in reductions:
-            if key in reduced and reduced[key] > reduce_fn(reduced[key]):
-                old_val = reduced[key]
-                reduced[key] = reduce_fn(reduced[key])
-                print(f"[BenchmarkWorker] Reduced {key}: {old_val} -> {reduced[key]}")
-                
-                if self._validate_triton_config(reduced):
-                    return reduced
-        
-        return None  # Can't reduce further
-    
-    def _categorize_error(self, stderr):
-        """Categorize error type from stderr output."""
-        if stderr is None:
-            return "unknown", PENALTY_TOTAL_FAILURE
-        
-        stderr_lower = stderr.lower()
-        
-        if "out of resource: shared memory" in stderr_lower:
-            return "shared_memory", PENALTY_SHARED_MEMORY
-        elif "insufficient registers" in stderr_lower:
-            return "register_overflow", PENALTY_REGISTER_OVERFLOW
-        elif "timeout" in stderr_lower:
-            return "timeout", PENALTY_TIMEOUT
-        elif "cuda out of memory" in stderr_lower or "oom" in stderr_lower:
-            return "cuda_oom", PENALTY_TOTAL_FAILURE
-        else:
-            return "unknown", PENALTY_TOTAL_FAILURE
-    
-    def _log_failed_config(self, config, error_type, error_msg):
-        """Log failed config for analysis."""
-        self.failed_configs.append({
-            'config': config.copy(),
-            'error_type': error_type,
-            'error_msg': str(error_msg)[:200],  # Truncate long messages
-            'timestamp': time.time()
-        })
-        
-        # Keep only last 100 failures to avoid memory bloat
-        if len(self.failed_configs) > 100:
-            self.failed_configs = self.failed_configs[-100:]
-    
-    def get_failure_stats(self):
-        """Return statistics about failed configs."""
-        if not self.failed_configs:
-            return {"total_failures": 0}
-        
-        error_counts = {}
-        for failure in self.failed_configs:
-            error_type = failure['error_type']
-            error_counts[error_type] = error_counts.get(error_type, 0) + 1
-        
-        return {
-            "total_failures": len(self.failed_configs),
-            "by_type": error_counts,
-            "recent_failures": self.failed_configs[-5:]
-        }
-
-    def run_fast_gym_benchmark(self, params_dict, static_args, reward_weights):
+    def run_fast_gym_benchmark(self, params_dict, static_args, reward_weights, num_tokens=None):
         """
         Runs the 'Fast Gym' (ncu) on this worker's GPU.
         Returns (state, reward, csv_data)
         
-        Includes retry logic and automatic config reduction.
+        Args:
+            params_dict: Kernel configuration parameters
+            static_args: Static arguments for the benchmark
+            reward_weights: Weights for reward calculation
+            num_tokens: Override token count (for multi-token testing)
         """
         
+        # Use override token count if provided
+        effective_static_args = static_args
+        if num_tokens is not None:
+            effective_static_args = static_args.copy()
+            effective_static_args['num_tokens'] = num_tokens
+        
+        # --- FIX for GROUP_SIZE_M error ---
         config_to_use = DEFAULT_CONFIG.copy()
         if params_dict:
             config_to_use.update(params_dict)
@@ -203,31 +141,31 @@ class BenchmarkWorker:
             with open(self.temp_config_path, "w") as f:
                 json.dump(config_to_use, f)
 
-            ncu_command = [
-                "ncu", "--csv",
-                "--kernel-name", static_args['kernel_name'], 
-                "--metrics", "sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed,lts__t_sector_hit_rate.pct,l1tex__t_sector_hit_rate.pct",
-                "--target-processes", "all",
-                "--force-overwrite",
-                "--log-file", self.ncu_log_path,
-            ]
+        ncu_command = [
+            "ncu", "--csv",
+            "--kernel-name", effective_static_args['kernel_name'], 
+            "--metrics", "sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed,lts__t_sector_hit_rate.pct,l1tex__t_sector_hit_rate.pct",
+            "--target-processes", "all",
+            "--force-overwrite",
+            "--log-file", self.ncu_log_path,
+        ]
 
-            python_command = [
-                "python", static_args['run_script_path'],
-                "--config-path", self.temp_config_path,
-                "--num-experts", str(static_args['num_experts']),
-                "--top-k", str(static_args['top_k']),
-                "--hidden-size", str(static_args['hidden_size']),
-                "--inter-size", str(static_args['inter_size']),
-                "--num-tokens", str(static_args['num_tokens']),
-                "--dtype", static_args['dtype'],
-                "--num-iters", str(static_args['num_iters']),
-                "--num-warmup-iters", "1", 
-            ]
-            
-            full_command = ncu_command + python_command
-            env = os.environ.copy()
-            env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id) 
+        python_command = [
+            "python", effective_static_args['run_script_path'],
+            "--config-path", self.temp_config_path,
+            "--num-experts", str(effective_static_args['num_experts']),
+            "--top-k", str(effective_static_args['top_k']),
+            "--hidden-size", str(effective_static_args['hidden_size']),
+            "--inter-size", str(effective_static_args['inter_size']),
+            "--num-tokens", str(effective_static_args['num_tokens']),
+            "--dtype", effective_static_args['dtype'],
+            "--num-iters", str(effective_static_args['num_iters']),
+            "--num-warmup-iters", "1", 
+        ]
+        
+        full_command = ncu_command + python_command
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id) 
 
             try:
                 subprocess.run(
