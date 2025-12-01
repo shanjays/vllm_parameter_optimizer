@@ -49,7 +49,7 @@ RUN_SCRIPT_PATH = "run_kernel_benchmark.py"
 EXPLORATION_STEPS = 10            # Increased from 8 for better exploration
 META_LEARNING_STEPS = 4           # Reduced from 50 for 5-hour run
 NUM_GENERATIONS = 4               # Reduced from 8
-MAX_COMPLETION_LENGTH = 1536      # Increased from 1024 for aggressive prompts
+MAX_COMPLETION_LENGTH = 256       # Reduced from 1536 to prevent verbose reasoning and truncation
 
 # vLLM validation settings
 VLLM_NUM_PROMPTS = 40             # Reduced from 100
@@ -121,12 +121,57 @@ def get_initial_profile_data():
     return csv_data
 
 
+def summarize_ncu_report(ncu_csv: str) -> str:
+    """
+    Summarize NCU profiling data into key metrics.
+    
+    Extracts and averages key performance metrics from raw NCU CSV data
+    to provide a concise summary for the LLM prompt.
+    
+    Args:
+        ncu_csv: Raw NCU CSV output string
+        
+    Returns:
+        str: Formatted summary of key metrics
+    """
+    import re
+    
+    # Extract key metrics using regex
+    sm_values = re.findall(r'sm__throughput\.avg\.pct_of_peak_sustained_elapsed[^0-9]*([0-9.]+)', ncu_csv)
+    dram_values = re.findall(r'dram__throughput\.avg\.pct_of_peak_sustained_elapsed[^0-9]*([0-9.]+)', ncu_csv)
+    l1_values = re.findall(r'l1tex__t_sector_hit_rate\.pct[^0-9]*([0-9.]+)', ncu_csv)
+    l2_values = re.findall(r'lts__t_sector_hit_rate\.pct[^0-9]*([0-9.]+)', ncu_csv)
+    
+    def avg(values):
+        if not values:
+            return "N/A"
+        nums = [float(v) for v in values if v]
+        return f"{sum(nums)/len(nums):.1f}%" if nums else "N/A"
+    
+    def range_str(values):
+        if not values:
+            return "N/A"
+        nums = [float(v) for v in values if v]
+        if not nums:
+            return "N/A"
+        return f"{min(nums):.1f}-{max(nums):.1f}%"
+    
+    summary = f"""- SM Throughput: {range_str(sm_values)} (avg: {avg(sm_values)})
+- DRAM Throughput: {range_str(dram_values)} (avg: {avg(dram_values)})
+- L1 Hit Rate: {range_str(l1_values)} (avg: {avg(l1_values)})
+- L2 Hit Rate: {range_str(l2_values)} (avg: {avg(l2_values)})"""
+    return summary
+
+
 def build_optimization_prompt(initial_ncu_report, feedback_collector=None):
     """
     Build the optimization prompt with optional feedback from previous iterations.
     
+    Uses chat template format and summarized NCU data to encourage concise JSON output
+    and prevent verbose reasoning that leads to truncation.
+    
     Args:
-        initial_ncu_report: Initial NCU profiling data
+        initial_ncu_report: Initial NCU profiling data (raw CSV)
         feedback_collector: Optional FeedbackCollector for contextual feedback
         
     Returns:
@@ -135,45 +180,38 @@ def build_optimization_prompt(initial_ncu_report, feedback_collector=None):
     # Format token counts for the prompt
     token_counts_str = ", ".join(str(tc) for tc in TOKEN_COUNTS_TO_TEST)
     
-    # Get feedback from previous iterations if available
+    # Summarize NCU data instead of including raw CSV
+    ncu_summary = summarize_ncu_report(initial_ncu_report)
+    
+    # Get feedback from previous iterations if available (concise format)
     feedback_section = ""
     if feedback_collector:
         feedback_section = feedback_collector.format_feedback_for_prompt()
+        if feedback_section:
+            feedback_section = f"\n{feedback_section}\n"
     
-    optimization_prompt = f"""You are a CUDA kernel optimization expert. Generate an optimization policy for fused_moe kernel.
+    # Use chat template format with system message establishing JSON-only role
+    # Start assistant response with <param> to force immediate JSON output
+    optimization_prompt = f"""<|im_start|>system
+You are a JSON policy generator for CUDA kernel optimization. You output ONLY valid JSON inside <param></param> tags. No explanations.<|im_end|>
+<|im_start|>user
+Generate an optimization policy for fused_moe kernel on H100 GPU.
 
-TARGET: {MODEL_NAME} | Experts: {STATIC_BENCHMARK_ARGS['num_experts']} | Inter: {STATIC_BENCHMARK_ARGS['inter_size']} | Top-K: {STATIC_BENCHMARK_ARGS['top_k']}
-HARDWARE: NVIDIA H100 80GB HBM3 | Shared Memory: 227KB
+Model: {MODEL_NAME}
+Config: E={STATIC_BENCHMARK_ARGS['num_experts']}, N={STATIC_BENCHMARK_ARGS['inter_size']}, TopK={STATIC_BENCHMARK_ARGS['top_k']}
+Token counts: {token_counts_str}
 
-TOKEN COUNTS: {token_counts_str}
-
-INITIAL METRICS:
-{initial_ncu_report}
-
-{feedback_section}IMPORTANT RULES:
-1. Output ONLY the <param>JSON</param> block - NO lengthy reasoning!
-2. Each search_space array MUST have AT LEAST 2 values
-3. Keep output under 200 tokens
-
+Baseline performance (from NCU profiling):
+{ncu_summary}
+{feedback_section}
+Rules:
+1. Output ONLY <param>{{JSON}}</param> - nothing else
+2. Each search_space array needs 2-3 values
+3. Weights must sum to 1.0
+4. Valid values: BLOCK_SIZE_M/N: [16,32,64,128], BLOCK_SIZE_K: [32,64], num_warps: [4,8,16], num_stages: [2,3,4,5]
+<|im_end|>
+<|im_start|>assistant
 <param>
-{{
-  "objective_weights": {{
-    "R_sm_throughput": 0.4,
-    "R_dram_throughput": 0.35,
-    "R_l1_hit_rate": 0.125,
-    "R_l2_hit_rate": 0.125
-  }},
-  "search_space": {{
-    "BLOCK_SIZE_M": [64, 128],
-    "BLOCK_SIZE_N": [64, 128],
-    "BLOCK_SIZE_K": [32, 64],
-    "num_warps": [8, 16],
-    "num_stages": [3, 4, 5]
-  }}
-}}
-</param>
-
-NOW OUTPUT YOUR OPTIMIZED POLICY (only <param>JSON</param>, no explanation):
 """
     return optimization_prompt
 
