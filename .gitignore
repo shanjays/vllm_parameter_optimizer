@@ -72,7 +72,7 @@ initial_profile.csv
 *.log
 
 # HAKT specific
-hakt_logs/
-hakt_professor_finetune/
-hakt_professor_final/
-hakt_configs/
+logs/
+hierarchical_optimizer_finetune/
+hierarchical_optimizer_final/
+optimized_configs/

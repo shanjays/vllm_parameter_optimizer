@@ -5,27 +5,33 @@ import time
 import os
 import re
 import ast
-from fast_gym_env import FastGymEnv
-from fighter_agent import FighterPilot
-from benchmark_worker import BenchmarkWorker
+from kernel_tuning_env import KernelTuningEnvironment
+from exploration_agent import ExplorationAgent
+from profiling_worker import ProfilingWorker
 
 POWER_OF_TWO_WARPS = (2, 4, 8, 16, 32)
 
-# Default mission plan with multiple options for PPO exploration
-DEFAULT_MISSION_PLAN = {
-    "reward_function": {
+# Default optimization policy with multiple options for PPO exploration
+DEFAULT_OPTIMIZATION_POLICY = {
+    "objective_weights": {
         "R_sm_throughput": 0.4,
         "R_dram_throughput": 0.3,
         "R_l1_hit_rate": 0.15,
         "R_l2_hit_rate": 0.15
     },
-    "pruned_action_space": {
+    "search_space": {
         "BLOCK_SIZE_M": [32, 64, 128],
         "BLOCK_SIZE_N": [32, 64, 128],
         "BLOCK_SIZE_K": [32, 64],
         "num_warps": [4, 8, 16],
         "num_stages": [2, 3, 4]
     }
+}
+
+# Backward compatibility alias
+DEFAULT_MISSION_PLAN = {
+    "reward_function": DEFAULT_OPTIMIZATION_POLICY["objective_weights"],
+    "pruned_action_space": DEFAULT_OPTIMIZATION_POLICY["search_space"]
 }
 
 # Default token counts to test (matching vLLM's expected format)
@@ -43,19 +49,43 @@ RESULTS_PER_TOKEN = 3
 # Validation frequency: run vLLM validation after every N token counts
 VALIDATE_EVERY_N_TOKENS = 3
 
-class HAKT_Reward_Function:
-    def __init__(self, user_goal, model_name, fast_loop_steps, worker_gpu_id, static_args, 
-                 config_saver=None, token_counts=None):
+class MetaControllerReward:
+    """
+    Meta-Controller Reward Function for hierarchical kernel optimization.
+    
+    This class orchestrates the hierarchical optimization process by:
+    1. Parsing optimization policies from LLM outputs
+    2. Running exploration phases using PPO agents
+    3. Validating configurations through throughput benchmarks
+    4. Computing rewards to guide the meta-learning process
+    
+    The reward function bridges the high-level policy generation (LLM)
+    with the low-level configuration exploration (PPO agent).
+    """
+    def __init__(self, user_goal, model_name, exploration_steps, profiling_gpu_id, static_args, 
+                 config_exporter=None, token_counts=None):
+        """
+        Initialize the meta-controller reward function.
+        
+        Args:
+            user_goal: Optimization target ('throughput' or 'latency')
+            model_name: Target model name for benchmarking
+            exploration_steps: Number of exploration steps per optimization round
+            profiling_gpu_id: GPU ID for the profiling worker
+            static_args: Static benchmark arguments
+            config_exporter: Optional VLLMConfigExporter for saving configs
+            token_counts: List of token counts to test
+        """
         self.user_goal = user_goal
         self.model_name = model_name
-        self.fast_loop_steps = fast_loop_steps
+        self.exploration_steps = exploration_steps
         self.static_args = static_args
-        self.config_saver = config_saver
+        self.config_exporter = config_exporter
         self.token_counts = token_counts or DEFAULT_TOKEN_COUNTS
-        print(f"[RewardFn] Requesting BenchmarkWorker for PHYSICAL GPU {worker_gpu_id}")
-        self.worker = BenchmarkWorker.options(num_gpus=1).remote(worker_gpu_id)
+        print(f"[MetaController] Requesting ProfilingWorker for PHYSICAL GPU {profiling_gpu_id}")
+        self.worker = ProfilingWorker.options(num_gpus=1).remote(profiling_gpu_id)
         self.initial_state = self._get_initial_state()
-        print(f"[RewardFn] Configured to test {len(self.token_counts)} token counts: {self.token_counts[:5]}...")
+        print(f"[MetaController] Configured to test {len(self.token_counts)} token counts: {self.token_counts[:5]}...")
 
     def _clean_non_json_types(self, data):
         if isinstance(data, dict):
@@ -69,54 +99,53 @@ class HAKT_Reward_Function:
         return data
 
     def _get_initial_state(self):
-        print("[RewardFn] Getting initial state from worker...")
+        print("[MetaController] Getting initial state from worker...")
         try:
-            job_id = self.worker.run_fast_gym_benchmark.remote(None, self.static_args, {})
+            job_id = self.worker.run_kernel_profiling.remote(None, self.static_args, {})
             state, reward, _ = ray.get(job_id)
             if state is None:
                 raise RuntimeError("Worker failed initial profile.")
-            print("[RewardFn] Initial state acquired.")
+            print("[MetaController] Initial state acquired.")
             return state
         except Exception as e:
-            print(f"[RewardFn] ERROR: Worker failed initial state check. Using fallback. {e}")
+            print(f"[MetaController] ERROR: Worker failed initial state check. Using fallback. {e}")
             return np.array([32.3, 40.8, 0.05, 69.9], dtype=np.float32)
 
     def __call__(self, completions, **kwargs):
         rewards = []
-        for i, plan_str in enumerate(completions):
-            print(f"\n--- [RewardFn] Processing Mission Plan {i+1}/{len(completions)} ---")
+        for i, policy_str in enumerate(completions):
+            print(f"\n--- [MetaController] Processing Optimization Policy {i+1}/{len(completions)} ---")
             
-            # --- DEBUG PRINT (as requested) ---
-            print(f"[RewardFn] DEBUG: Raw LLM Output:\n{plan_str}\n")
-            # --- END DEBUG PRINT ---
+            # Debug output
+            print(f"[MetaController] DEBUG: Raw LLM Output:\n{policy_str}\n")
 
             valid = True
             try:
-                plan = self._extract_json(plan_str)
-                plan = self._clean_non_json_types(plan)
-                plan = self._validate_and_coerce_plan(plan)
+                policy = self._extract_json(policy_str)
+                policy = self._clean_non_json_types(policy)
+                policy = self._validate_and_coerce_policy(policy)
 
-                path = f"temp_mission_plan_{int(time.time())}_{i}.json"
+                path = f"temp_optimization_policy_{int(time.time())}_{i}.json"
                 with open(path, "w") as f:
-                    json.dump(plan, f, indent=2)
+                    json.dump(policy, f, indent=2)
 
-                print(f"[RewardFn] Starting 'Fast Loop' PPO training ({self.fast_loop_steps} steps)...")
-                top_configs = self._run_fast_loop(path)
-                print(f"[RewardFn] Starting 'Slow Gym' validation (Top {len(top_configs)} configs)...")
-                final_metric = self._run_slow_gym(top_configs)
+                print(f"[MetaController] Starting exploration phase ({self.exploration_steps} steps)...")
+                top_configs = self._run_exploration_phase(path)
+                print(f"[MetaController] Starting throughput validation (Top {len(top_configs)} configs)...")
+                final_metric = self._run_throughput_validation(top_configs)
                 rewards.append(final_metric)
                 os.remove(path)
             except Exception as e:
                 valid = False
-                print(f"[RewardFn] ERROR: HAKT reward calculation failed. Reason: {e}")
+                print(f"[MetaController] ERROR: Reward calculation failed. Reason: {e}")
                 rewards.append(0.0)
                 if not valid:
-                    self._run_default_penalty_plan(i)
+                    self._run_default_penalty_policy(i)
         
         # Print training summary
-        if self.config_saver:
-            summary = self.config_saver.get_summary()
-            print(f"\n[RewardFn] === Training Summary ===")
+        if self.config_exporter:
+            summary = self.config_exporter.get_summary()
+            print(f"\n[MetaController] === Training Summary ===")
             print(f"  Total configs tested: {summary['total_experiments']}")
             print(f"  Token counts covered: {summary['total_token_counts']}")
             print(f"  Best rewards by token count:")
@@ -125,25 +154,24 @@ class HAKT_Reward_Function:
         
         return rewards
 
-    def _run_default_penalty_plan(self, idx):
-        print("[RewardFn] Plan failed. Running Fast Loop on default, penalized plan to ensure training progression.")
-        # Use DEFAULT_MISSION_PLAN to ensure action space > 1 for exploration
-        default_plan = {
-            "reward_function": {
+    def _run_default_penalty_policy(self, idx):
+        print("[MetaController] Policy failed. Running exploration phase on default policy to ensure training progression.")
+        default_policy = {
+            "objective_weights": {
                 "R_sm_throughput": 0.01,
                 "R_dram_throughput": 0.0,
                 "R_l1_hit_rate": 0.0,
                 "R_l2_hit_rate": 0.0
             },
-            "pruned_action_space": DEFAULT_MISSION_PLAN["pruned_action_space"].copy()
+            "search_space": DEFAULT_OPTIMIZATION_POLICY["search_space"].copy()
         }
-        path = f"temp_default_plan_{int(time.time())}_{idx}.json"
+        path = f"temp_default_policy_{int(time.time())}_{idx}.json"
         try:
             with open(path, "w") as f:
-                json.dump(default_plan, f, indent=2)
-            self._run_fast_loop(path)
+                json.dump(default_policy, f, indent=2)
+            self._run_exploration_phase(path)
         except Exception as e:
-            print(f"[RewardFn] WARNING: Default Fast Loop also failed. {e}")
+            print(f"[MetaController] WARNING: Default exploration phase also failed. {e}")
         finally:
             if os.path.exists(path):
                 os.remove(path)
@@ -211,7 +239,7 @@ class HAKT_Reward_Function:
         param_match = re.search(r'<param>\s*(\{[\s\S]*?\})\s*</param>', llm_output_str, re.DOTALL | re.IGNORECASE)
         if param_match:
             json_str = param_match.group(1).strip()
-            print("[RewardFn] Found JSON content within <param> tags.")
+            print("[MetaController] Found JSON content within <param> tags.")
         else:
             # Fallback: Try to find any content between <param> tags 
             param_any_match = re.search(r'<param>\s*(.*?)\s*</param>', llm_output_str, re.DOTALL | re.IGNORECASE)
@@ -220,10 +248,10 @@ class HAKT_Reward_Function:
                 # Check if it starts with { (JSON object)
                 if content.startswith('{'):
                     json_str = content
-                    print("[RewardFn] Found content within <param> tags.")
+                    print("[MetaController] Found content within <param> tags.")
                 else:
                     # Content inside tags but not JSON-like
-                    print(f"[RewardFn] WARNING: Content in <param> tags is not JSON-like, using fallback")
+                    print(f"[MetaController] WARNING: Content in <param> tags is not JSON-like, using fallback")
                     json_str = None
             else:
                 json_str = None
@@ -233,7 +261,7 @@ class HAKT_Reward_Function:
                 param_start_match = re.search(r'<param>\s*(\{.*)', llm_output_str, re.DOTALL | re.IGNORECASE)
                 if param_start_match:
                     json_str = param_start_match.group(1).strip()
-                    print("[RewardFn] Found truncated content after <param> tag, attempting recovery.")
+                    print("[MetaController] Found truncated content after <param> tag, attempting recovery.")
                     # Try to fix truncated JSON
                     recovered_json = self._try_recover_json(json_str)
                     if recovered_json is not None:
@@ -246,16 +274,16 @@ class HAKT_Reward_Function:
                     match_partial = re.search(r'(\{.*)', llm_output_str, re.DOTALL)
                     if match_partial:
                         json_str = match_partial.group(1).strip()
-                        print("[RewardFn] Found partial JSON, attempting recovery.")
+                        print("[MetaController] Found partial JSON, attempting recovery.")
                         recovered_json = self._try_recover_json(json_str)
                         if recovered_json is not None:
                             return recovered_json
                     
-                    salvage = self._try_salvage_plan(llm_output_str)
+                    salvage = self._try_salvage_policy(llm_output_str)
                     if salvage is not None:
                         return salvage
-                    print("[RewardFn] No braces found; using default-safe plan for this completion.")
-                    return self._default_safe_plan()
+                    print("[MetaController] No braces found; using default-safe policy for this completion.")
+                    return self._default_safe_policy()
                 json_str = match.group(0).strip()
 
         json_str = json_str.replace('```json', '').replace('```', '').strip()
@@ -314,7 +342,7 @@ class HAKT_Reward_Function:
                 try:
                     return ast.literal_eval(normalized)
                 except Exception:
-                    return self._default_safe_plan()
+                    return self._default_safe_policy()
 
     def _try_recover_json(self, json_str):
         """
@@ -326,7 +354,7 @@ class HAKT_Reward_Function:
             if isinstance(recovered_json, dict):
                 return recovered_json
             else:
-                print(f"[RewardFn] WARNING: Recovered JSON is {type(recovered_json)}, expected dict")
+                print(f"[MetaController] WARNING: Recovered JSON is {type(recovered_json)}, expected dict")
         return None
 
     def _fix_truncated_json(self, json_str):
@@ -361,16 +389,21 @@ class HAKT_Reward_Function:
             except Exception:
                 return None
 
-    def _default_safe_plan(self):
-        """Return a safe default plan with multiple options for exploration."""
+    def _default_safe_policy(self):
+        """Return a safe default policy with multiple options for exploration."""
         return {
-            "reward_function": DEFAULT_MISSION_PLAN["reward_function"].copy(),
-            "pruned_action_space": {
-                k: list(v) for k, v in DEFAULT_MISSION_PLAN["pruned_action_space"].items()
+            "objective_weights": DEFAULT_OPTIMIZATION_POLICY["objective_weights"].copy(),
+            "search_space": {
+                k: list(v) for k, v in DEFAULT_OPTIMIZATION_POLICY["search_space"].items()
             }
         }
 
-    def _try_salvage_plan(self, s: str):
+    def _default_safe_plan(self):
+        """Legacy method for backward compatibility."""
+        return self._default_safe_policy()
+
+    def _try_salvage_policy(self, s: str):
+        """Try to salvage partial policy data from malformed output."""
         rf_keys = ("R_sm_throughput", "R_dram_throughput", "R_l1_hit_rate", "R_l2_hit_rate")
         pas_keys = ("BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "num_warps", "num_stages")
         rf = {}
@@ -410,24 +443,34 @@ class HAKT_Reward_Function:
                 if k not in pas:
                     default = 64 if "BLOCK" in k else (32 if k == "BLOCK_SIZE_K" else 4)
                     pas[k] = [default]
-            return {"reward_function": rf, "pruned_action_space": pas}
+            return {"objective_weights": rf, "search_space": pas}
         return None
 
-    def _validate_and_coerce_plan(self, plan):
-        """Validate and coerce the mission plan, using defaults for missing/invalid values."""
-        # If plan is None or not a dict, use default
-        if plan is None or not isinstance(plan, dict):
-            print("[RewardFn] WARNING: Invalid plan (None or not dict), using default mission plan")
+    def _try_salvage_plan(self, s: str):
+        """Legacy method for backward compatibility."""
+        return self._try_salvage_policy(s)
+
+    def _validate_and_coerce_policy(self, policy):
+        """Validate and coerce the optimization policy, using defaults for missing/invalid values."""
+        # If policy is None or not a dict, use default
+        if policy is None or not isinstance(policy, dict):
+            print("[MetaController] WARNING: Invalid policy (None or not dict), using default optimization policy")
             return {
-                "reward_function": DEFAULT_MISSION_PLAN["reward_function"].copy(),
-                "pruned_action_space": {
-                    k: list(v) for k, v in DEFAULT_MISSION_PLAN["pruned_action_space"].items()
+                "objective_weights": DEFAULT_OPTIMIZATION_POLICY["objective_weights"].copy(),
+                "search_space": {
+                    k: list(v) for k, v in DEFAULT_OPTIMIZATION_POLICY["search_space"].items()
                 }
             }
-            
-        rf = plan.get("reward_function", {})
+        
+        # Support both old and new key names for backward compatibility
+        if "objective_weights" in policy:
+            rf = policy.get("objective_weights", {})
+        else:
+            rf = policy.get("reward_function", {})
+        
         if not isinstance(rf, dict):
             rf = {}
+        
         # If reward values are lists, take first numeric
         def _scalar(v):
             if isinstance(v, list):
@@ -443,16 +486,21 @@ class HAKT_Reward_Function:
         # Ensure all required reward keys are present
         required_keys = ["R_sm_throughput", "R_dram_throughput", "R_l1_hit_rate", "R_l2_hit_rate"]
         for k in required_keys:
-            rf[k] = _scalar(rf.get(k, DEFAULT_MISSION_PLAN["reward_function"].get(k, 0.0)))
+            rf[k] = _scalar(rf.get(k, DEFAULT_OPTIMIZATION_POLICY["objective_weights"].get(k, 0.0)))
         
         # Normalize weights to sum to 1.0 if total > 0
         total = sum(rf.values())
         if total > 0:
             rf = {k: v / total for k, v in rf.items()}
 
-        pas = plan.get("pruned_action_space", {})
-        if not isinstance(pas, dict) or not pas:
-            pas = {k: list(v) for k, v in DEFAULT_MISSION_PLAN["pruned_action_space"].items()}
+        # Support both old and new key names for search space
+        if "search_space" in policy:
+            ss = policy.get("search_space", {})
+        else:
+            ss = policy.get("pruned_action_space", {})
+        
+        if not isinstance(ss, dict) or not ss:
+            ss = {k: list(v) for k, v in DEFAULT_OPTIMIZATION_POLICY["search_space"].items()}
             
         def _coerce_list(v, default):
             if isinstance(v, list):
@@ -470,81 +518,80 @@ class HAKT_Reward_Function:
             except Exception:
                 return [default]
         
-        # Get default values from DEFAULT_MISSION_PLAN
-        pas["BLOCK_SIZE_M"] = _coerce_list(pas.get("BLOCK_SIZE_M", DEFAULT_MISSION_PLAN["pruned_action_space"]["BLOCK_SIZE_M"]), 64)
-        pas["BLOCK_SIZE_N"] = _coerce_list(pas.get("BLOCK_SIZE_N", DEFAULT_MISSION_PLAN["pruned_action_space"]["BLOCK_SIZE_N"]), 64)
-        pas["BLOCK_SIZE_K"] = _coerce_list(pas.get("BLOCK_SIZE_K", DEFAULT_MISSION_PLAN["pruned_action_space"]["BLOCK_SIZE_K"]), 32)
-        pas["num_warps"]    = _coerce_list(pas.get("num_warps", DEFAULT_MISSION_PLAN["pruned_action_space"]["num_warps"]), 4)
-        pas["num_stages"]   = _coerce_list(pas.get("num_stages", DEFAULT_MISSION_PLAN["pruned_action_space"]["num_stages"]), 4)
+        # Get default values from DEFAULT_OPTIMIZATION_POLICY
+        ss["BLOCK_SIZE_M"] = _coerce_list(ss.get("BLOCK_SIZE_M", DEFAULT_OPTIMIZATION_POLICY["search_space"]["BLOCK_SIZE_M"]), 64)
+        ss["BLOCK_SIZE_N"] = _coerce_list(ss.get("BLOCK_SIZE_N", DEFAULT_OPTIMIZATION_POLICY["search_space"]["BLOCK_SIZE_N"]), 64)
+        ss["BLOCK_SIZE_K"] = _coerce_list(ss.get("BLOCK_SIZE_K", DEFAULT_OPTIMIZATION_POLICY["search_space"]["BLOCK_SIZE_K"]), 32)
+        ss["num_warps"]    = _coerce_list(ss.get("num_warps", DEFAULT_OPTIMIZATION_POLICY["search_space"]["num_warps"]), 4)
+        ss["num_stages"]   = _coerce_list(ss.get("num_stages", DEFAULT_OPTIMIZATION_POLICY["search_space"]["num_stages"]), 4)
         # Enforce power-of-two warps
-        pas["num_warps"] = [w for w in pas["num_warps"] if w in POWER_OF_TWO_WARPS] or [4]
+        ss["num_warps"] = [w for w in ss["num_warps"] if w in POWER_OF_TWO_WARPS] or [4]
         
         # H100 hardware constraint validation - clamp values to safe limits
-        # H100 has 228KB shared memory per SM, we use conservative 227KB (232,448 bytes)
-        # Values > 128 for M/N and > 64 for K can cause Triton shared memory overflow
-        # when combined with high num_stages (e.g., 128*128 + 128*128 * 2 * 4 = 262KB)
         H100_BLOCK_SIZE_MN_LIMIT = 128
-        H100_BLOCK_SIZE_K_LIMIT = 64  # Lower limit for K to avoid overflow with high M/N
+        H100_BLOCK_SIZE_K_LIMIT = 64
         H100_NUM_STAGES_LIMIT = 4
         
-        pas["BLOCK_SIZE_M"] = [min(v, H100_BLOCK_SIZE_MN_LIMIT) for v in pas["BLOCK_SIZE_M"]]
-        pas["BLOCK_SIZE_N"] = [min(v, H100_BLOCK_SIZE_MN_LIMIT) for v in pas["BLOCK_SIZE_N"]]
-        pas["BLOCK_SIZE_K"] = [min(v, H100_BLOCK_SIZE_K_LIMIT) for v in pas["BLOCK_SIZE_K"]]
-        pas["num_stages"] = [min(v, H100_NUM_STAGES_LIMIT) for v in pas["num_stages"]]
+        ss["BLOCK_SIZE_M"] = [min(v, H100_BLOCK_SIZE_MN_LIMIT) for v in ss["BLOCK_SIZE_M"]]
+        ss["BLOCK_SIZE_N"] = [min(v, H100_BLOCK_SIZE_MN_LIMIT) for v in ss["BLOCK_SIZE_N"]]
+        ss["BLOCK_SIZE_K"] = [min(v, H100_BLOCK_SIZE_K_LIMIT) for v in ss["BLOCK_SIZE_K"]]
+        ss["num_stages"] = [min(v, H100_NUM_STAGES_LIMIT) for v in ss["num_stages"]]
         
         # Remove duplicates and ensure non-empty lists
         for key in ["BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "num_stages"]:
-            pas[key] = list(set(pas[key])) or ([64] if "BLOCK" in key else [4])
+            ss[key] = list(set(ss[key])) or ([64] if "BLOCK" in key else [4])
         
-        # Ensure action space has at least 2 combinations for PPO exploration
+        # Ensure search space has at least 2 combinations for PPO exploration
         total_combinations = 1
-        for values in pas.values():
+        for values in ss.values():
             total_combinations *= len(values)
         
         if total_combinations < 2:
-            print(f"[RewardFn] WARNING: Action space too small ({total_combinations} combinations), using default")
-            pas = {k: list(v) for k, v in DEFAULT_MISSION_PLAN["pruned_action_space"].items()}
+            print(f"[MetaController] WARNING: Search space too small ({total_combinations} combinations), using default")
+            ss = {k: list(v) for k, v in DEFAULT_OPTIMIZATION_POLICY["search_space"].items()}
         
-        return {"reward_function": rf, "pruned_action_space": pas}
+        return {"objective_weights": rf, "search_space": ss}
 
-    def _run_fast_loop(self, mission_plan_path):
-        """Run fast loop for EACH token count."""
+    def _validate_and_coerce_plan(self, plan):
+        """Legacy method for backward compatibility."""
+        return self._validate_and_coerce_policy(plan)
+
+    def _run_exploration_phase(self, policy_config_path):
+        """Run exploration phase for EACH token count."""
         all_top_results = []
         best_configs_for_validation = []
         total_tokens = len(self.token_counts)
         
         # Calculate steps per token count
-        steps_per_token = max(MIN_STEPS_PER_TOKEN, self.fast_loop_steps // len(self.token_counts))
+        steps_per_token = max(MIN_STEPS_PER_TOKEN, self.exploration_steps // len(self.token_counts))
         
         for i, token_count in enumerate(self.token_counts):
-            print(f"\n[RewardFn] === Token Count {i+1}/{total_tokens}: {token_count} tokens ===")
+            print(f"\n[MetaController] === Token Count {i+1}/{total_tokens}: {token_count} tokens ===")
             
-            env = FastGymEnv(
-                mission_plan_path=mission_plan_path,
-                benchmark_worker=self.worker,
+            env = KernelTuningEnvironment(
+                policy_config_path=policy_config_path,
+                profiling_worker=self.worker,
                 static_args=self.static_args,
                 initial_state=self.initial_state,
-                config_saver=self.config_saver,
+                config_exporter=self.config_exporter,
                 current_token_count=token_count
             )
-            log_dir = f"./hakt_logs/run_{int(time.time())}_tokens{token_count}/"
+            log_dir = f"./logs/exploration_{int(time.time())}_tokens{token_count}/"
             prev_cuda = os.environ.get("CUDA_VISIBLE_DEVICES")
             
-            # --- THIS IS THE FIX ---
             # Hide GPUs for SB3 MLP – force CPU
             os.environ["CUDA_VISIBLE_DEVICES"] = "" 
-            pilot = None
+            agent = None
             try:
-                pilot = FighterPilot(env, log_dir=log_dir, device="cpu") # Force CPU
-                pilot.train_epoch(steps=steps_per_token)
+                agent = ExplorationAgent(env, log_dir=log_dir, device="cpu")
+                agent.train_epoch(steps=steps_per_token)
                 top = env.get_top_results(n=RESULTS_PER_TOKEN)
-                print(f"[RewardFn] Token count {token_count}: Found {len(top)} results.")
+                print(f"[MetaController] Token count {token_count}: Found {len(top)} results.")
                 all_top_results.extend(top)
                 best_configs_for_validation.extend(top)
-            # --- END FIX ---
             finally:
-                if pilot:
-                    try: pilot.close()
+                if agent:
+                    try: agent.close()
                     except Exception: pass
                 env.close()
                 if prev_cuda is None:
@@ -554,35 +601,46 @@ class HAKT_Reward_Function:
             
             # Periodic validation
             if (i + 1) % VALIDATE_EVERY_N_TOKENS == 0 and best_configs_for_validation:
-                print(f"[RewardFn] Running periodic vLLM validation after {i+1} token counts...")
-                # best_configs_for_validation contains tuples of (params, state, reward)
-                best_config = max(best_configs_for_validation, key=lambda x: x[2])  # x[2] is reward
-                throughput = self._run_slow_gym([best_config])
-                print(f"[RewardFn] Periodic validation throughput: {throughput} tokens/sec")
+                print(f"[MetaController] Running periodic throughput validation after {i+1} token counts...")
+                best_config = max(best_configs_for_validation, key=lambda x: x[2])
+                throughput = self._run_throughput_validation([best_config])
+                print(f"[MetaController] Periodic validation throughput: {throughput} tokens/sec")
                 best_configs_for_validation = []
         
         # Return combined top results from all token counts
         if all_top_results:
-            # Sort by reward and return top 5
             sorted_results = sorted(all_top_results, key=lambda x: x[2], reverse=True)
-            print(f"[RewardFn] Fast Loop completed. Total {len(all_top_results)} results across {len(self.token_counts)} token counts.")
+            print(f"[MetaController] Exploration phase completed. Total {len(all_top_results)} results across {len(self.token_counts)} token counts.")
             return sorted_results[:5]
         return []
 
-    def _run_slow_gym(self, top_configs):
+    def _run_fast_loop(self, mission_plan_path):
+        """Legacy method for backward compatibility."""
+        return self._run_exploration_phase(mission_plan_path)
+
+    def _run_throughput_validation(self, top_configs):
+        """Run throughput validation on the best configurations."""
         if not top_configs:
-            print("[RewardFn] No valid configurations found for Slow Gym validation.")
+            print("[MetaController] No valid configurations found for throughput validation.")
             return 0.0
         ids = [
-            self.worker.run_slow_gym_validation.remote(params, self.model_name, self.user_goal)
+            self.worker.run_throughput_validation.remote(params, self.model_name, self.user_goal)
             for params, state, reward in top_configs
         ]
-        print(f"[RewardFn] Awaiting validation metrics for {len(top_configs)} configs from BenchmarkWorker...")
+        print(f"[MetaController] Awaiting validation metrics for {len(top_configs)} configs from ProfilingWorker...")
         metrics = ray.get(ids)
         if self.user_goal == "throughput":
             best = max(metrics)
         else:
             valid = [m for m in metrics if m > 0]
             best = min(valid) if valid else 0.0
-        print(f"[RewardFn] Slow Gym validation complete. Best metric: {best}")
+        print(f"[MetaController] Throughput validation complete. Best metric: {best}")
         return best
+
+    def _run_slow_gym(self, top_configs):
+        """Legacy method for backward compatibility."""
+        return self._run_throughput_validation(top_configs)
+
+
+# Backward compatibility alias
+HAKT_Reward_Function = MetaControllerReward

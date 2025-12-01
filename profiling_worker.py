@@ -23,12 +23,19 @@ DEFAULT_RETRY_DELAY = 1
 DEFAULT_NCU_TIMEOUT = 60
 
 @ray.remote(num_gpus=1)
-class BenchmarkWorker:
+class ProfilingWorker:
+    """
+    Profiling worker for kernel configuration benchmarking.
+    
+    This worker runs on a dedicated GPU and executes NCU profiling
+    to collect performance metrics for different kernel configurations.
+    It communicates with the meta-controller via Ray.
+    """
     def __init__(self, gpu_id):
         self.gpu_id = gpu_id
         pid = os.getpid()
-        self.ncu_log_path = f"/tmp/hakt_ncu_log_gpu{self.gpu_id}_{pid}.csv"
-        self.temp_config_path = f"/tmp/hakt_temp_config_gpu{self.gpu_id}_{pid}.json"
+        self.ncu_log_path = f"/tmp/profiling_ncu_log_gpu{self.gpu_id}_{pid}.csv"
+        self.temp_config_path = f"/tmp/profiling_temp_config_gpu{self.gpu_id}_{pid}.json"
         self.failed_configs = []
         self.max_retries = DEFAULT_MAX_RETRIES
         self.retry_delay = DEFAULT_RETRY_DELAY
@@ -44,14 +51,14 @@ class BenchmarkWorker:
                  self.vllm_config_dir = "/tmp/vllm_configs/"
                  
             os.makedirs(self.vllm_config_dir, exist_ok=True)
-            print(f"[BenchmarkWorker] vLLM config path set to: {self.vllm_config_dir}")
+            print(f"[ProfilingWorker] vLLM config path set to: {self.vllm_config_dir}")
             del vllm 
         except Exception as e:
-            print(f"[BenchmarkWorker] WARNING: Could not find vLLM path. {e}")
+            print(f"[ProfilingWorker] WARNING: Could not find vLLM path. {e}")
             self.vllm_config_dir = "/tmp/vllm_configs/" 
             os.makedirs(self.vllm_config_dir, exist_ok=True)
             
-        print(f"[BenchmarkWorker] Initialized on PHYSICAL GPU {self.gpu_id} (PID: {pid})")
+        print(f"[ProfilingWorker] Initialized on PHYSICAL GPU {self.gpu_id} (PID: {pid})")
 
     def get_gpu_id(self):
         return self.gpu_id
@@ -65,8 +72,8 @@ class BenchmarkWorker:
         shared_mem = (M * K + K * N) * 2 * stages
         H100_LIMIT = 232448
         if shared_mem > H100_LIMIT:
-            print(f"[BenchmarkWorker] Config exceeds shared memory: {shared_mem} bytes > {H100_LIMIT} bytes")
-            print(f"[BenchmarkWorker] Offending config: BLOCK_SIZE_M={M}, BLOCK_SIZE_N={N}, BLOCK_SIZE_K={K}, num_stages={stages}")
+            print(f"[ProfilingWorker] Config exceeds shared memory: {shared_mem} bytes > {H100_LIMIT} bytes")
+            print(f"[ProfilingWorker] Offending config: BLOCK_SIZE_M={M}, BLOCK_SIZE_N={N}, BLOCK_SIZE_K={K}, num_stages={stages}")
             return False
         return True
 
@@ -84,7 +91,7 @@ class BenchmarkWorker:
                 new_val = reduce_fn(reduced[key])
                 if new_val < old_val:
                     reduced[key] = new_val
-                    print(f"[BenchmarkWorker] Reduced {key}: {old_val} -> {new_val}")
+                    print(f"[ProfilingWorker] Reduced {key}: {old_val} -> {new_val}")
                     if self._validate_triton_config(reduced):
                         return reduced
         return None
@@ -113,7 +120,19 @@ class BenchmarkWorker:
         if len(self.failed_configs) > 100:
             self.failed_configs = self.failed_configs[-100:]
 
-    def run_fast_gym_benchmark(self, params_dict, static_args, reward_weights, num_tokens=None):
+    def run_kernel_profiling(self, params_dict, static_args, objective_weights, num_tokens=None):
+        """
+        Execute kernel profiling with the given configuration.
+        
+        Args:
+            params_dict: Kernel configuration parameters
+            static_args: Static arguments for the benchmark
+            objective_weights: Weights for computing the objective function
+            num_tokens: Optional number of tokens for the benchmark
+            
+        Returns:
+            Tuple of (state, reward, csv_data)
+        """
         effective_static_args = static_args
         if num_tokens is not None:
             effective_static_args = static_args.copy()
@@ -125,25 +144,25 @@ class BenchmarkWorker:
         
         num_warps = config_to_use.get('num_warps', 4)
         if num_warps <= 0 or (num_warps & (num_warps - 1)) != 0:
-            print(f"[BenchmarkWorker] WARNING: Invalid num_warps={num_warps}, using 4")
+            print(f"[ProfilingWorker] WARNING: Invalid num_warps={num_warps}, using 4")
             config_to_use['num_warps'] = 4
         
         if not self._validate_triton_config(config_to_use):
-            print(f"[BenchmarkWorker] Config exceeds limits, attempting reduction...")
+            print(f"[ProfilingWorker] Config exceeds limits, attempting reduction...")
             reduced_config = self._reduce_config(config_to_use)
             if reduced_config is None:
-                print(f"[BenchmarkWorker] Cannot reduce config further, returning penalty")
+                print(f"[ProfilingWorker] Cannot reduce config further, returning penalty")
                 self._log_failed_config(config_to_use, "shared_memory", "Config exceeds limits")
                 return None, PENALTY_SHARED_MEMORY, None
             config_to_use = reduced_config
-            print(f"[BenchmarkWorker] Using reduced config: {config_to_use}")
+            print(f"[ProfilingWorker] Using reduced config: {config_to_use}")
         
         last_error = None
         last_stderr = None
         
         for attempt in range(self.max_retries):
             if attempt > 0:
-                print(f"[BenchmarkWorker] Retry attempt {attempt + 1}/{self.max_retries}")
+                print(f"[ProfilingWorker] Retry attempt {attempt + 1}/{self.max_retries}")
                 time.sleep(self.retry_delay)
             
             with open(self.temp_config_path, "w") as f:
@@ -190,7 +209,7 @@ class BenchmarkWorker:
                 last_error = e
                 last_stderr = e.stderr
                 error_type, penalty = self._categorize_error(e.stderr)
-                print(f"[BenchmarkWorker] NCU failed (attempt {attempt + 1}): {error_type}")
+                print(f"[ProfilingWorker] NCU failed (attempt {attempt + 1}): {error_type}")
                 if error_type in ["shared_memory", "register_overflow"]:
                     self._log_failed_config(config_to_use, error_type, e.stderr)
                     return None, penalty, None
@@ -198,11 +217,11 @@ class BenchmarkWorker:
             except subprocess.TimeoutExpired as e:
                 last_error = e
                 last_stderr = "Timeout expired"
-                print(f"[BenchmarkWorker] NCU timed out (attempt {attempt + 1})")
+                print(f"[ProfilingWorker] NCU timed out (attempt {attempt + 1})")
                 
         else:
             error_type, penalty = self._categorize_error(last_stderr)
-            print(f"[BenchmarkWorker] All retries exhausted. Error type: {error_type}")
+            print(f"[ProfilingWorker] All retries exhausted. Error type: {error_type}")
             self._log_failed_config(config_to_use, error_type, str(last_error))
             return None, penalty, None
 
@@ -268,33 +287,51 @@ class BenchmarkWorker:
                 np.mean(metrics['l2'])
             ], dtype=np.float32)
             
-            reward = self._calculate_reward(state, reward_weights)
+            reward = self._calculate_reward(state, objective_weights)
             return state, reward, csv_data
 
         except Exception as e:
-            print(f"[BenchmarkWorker] ERROR: NCU CSV parsing failed. {e}")
+            print(f"[ProfilingWorker] ERROR: NCU CSV parsing failed. {e}")
             self._log_failed_config(config_to_use, "parse_error", str(e))
             return None, PENALTY_PARSE_ERROR, None
 
-    def _calculate_reward(self, state, reward_weights):
+    def _calculate_objective(self, state, objective_weights):
+        """Calculate the objective function value from state and weights."""
         sm, dram, l1, l2 = state
-        reward = (
-            sm * reward_weights.get('R_sm_throughput', 0.0) +
-            dram * reward_weights.get('R_dram_throughput', 0.0) +
-            l1 * reward_weights.get('R_l1_hit_rate', 0.0) +
-            l2 * reward_weights.get('R_l2_hit_rate', 0.0)
+        objective = (
+            sm * objective_weights.get('R_sm_throughput', 0.0) +
+            dram * objective_weights.get('R_dram_throughput', 0.0) +
+            l1 * objective_weights.get('R_l1_hit_rate', 0.0) +
+            l2 * objective_weights.get('R_l2_hit_rate', 0.0)
         )
-        return float(reward)
+        return float(objective)
 
-    def run_slow_gym_validation(self, params_dict, model_name, user_goal):
-        """Runs the 'Slow Gym' (vllm bench) on this worker's GPU."""
+    def _calculate_reward(self, state, reward_weights):
+        """Legacy method for backward compatibility."""
+        return self._calculate_objective(state, reward_weights)
+
+    def run_throughput_validation(self, params_dict, model_name, user_goal):
+        """
+        Run throughput validation using vLLM benchmarking.
+        
+        This method validates kernel configurations by running actual
+        inference throughput tests with vLLM.
+        
+        Args:
+            params_dict: Kernel configuration parameters
+            model_name: Name of the model to benchmark
+            user_goal: Optimization goal ('throughput' or 'latency')
+            
+        Returns:
+            float: Throughput metric in tokens/sec
+        """
         try:
             import vllm
         except ImportError:
-            print("[BenchmarkWorker] ERROR: vLLM not found in worker process.")
+            print("[ProfilingWorker] ERROR: vLLM not found in worker process.")
             return 0.0
         except Exception as e:
-            print(f"[BenchmarkWorker] ERROR: vLLM import failed in worker. {e}")
+            print(f"[ProfilingWorker] ERROR: vLLM import failed in worker. {e}")
             return 0.0
 
         static_args = {
@@ -315,9 +352,9 @@ class BenchmarkWorker:
         try:
             with open(config_path, "w") as f:
                 json.dump(vllm_config_data, f, indent=2)
-            print(f"[BenchmarkWorker] Wrote config to vLLM default path: {config_path}")
+            print(f"[ProfilingWorker] Wrote config to vLLM default path: {config_path}")
         except Exception as e:
-            print(f"[BenchmarkWorker] ERROR: Failed to write vLLM config file. {e}")
+            print(f"[ProfilingWorker] ERROR: Failed to write vLLM config file. {e}")
             return 0.0
             
         env = os.environ.copy()
@@ -345,7 +382,7 @@ class BenchmarkWorker:
         ]
         
         try:
-            print(f"[BenchmarkWorker] Running Slow Gym: {' '.join(command)}")
+            print(f"[ProfilingWorker] Running throughput validation: {' '.join(command)}")
             result = subprocess.run(
                 command, 
                 env=env, 
@@ -357,7 +394,7 @@ class BenchmarkWorker:
             output = result.stdout
             
             metric = self._parse_vllm_bench_output(output, user_goal)
-            print(f"[BenchmarkWorker] Slow Gym Result: {metric} tokens/sec")
+            print(f"[ProfilingWorker] Throughput validation result: {metric} tokens/sec")
             
             # Clean up config file
             if os.path.exists(config_path):
@@ -365,23 +402,27 @@ class BenchmarkWorker:
             return metric
 
         except subprocess.CalledProcessError as e:
-            print(f"[BenchmarkWorker] ERROR: vllm bench failed. Return code: {e.returncode}")
-            print(f"[BenchmarkWorker] STDERR: {e.stderr[:500] if e.stderr else 'None'}")
+            print(f"[ProfilingWorker] ERROR: vllm bench failed. Return code: {e.returncode}")
+            print(f"[ProfilingWorker] STDERR: {e.stderr[:500] if e.stderr else 'None'}")
             if os.path.exists(config_path):
                 os.remove(config_path)
             return 0.0
             
         except subprocess.TimeoutExpired:
-            print(f"[BenchmarkWorker] ERROR: vllm bench timed out after 600s")
+            print(f"[ProfilingWorker] ERROR: vllm bench timed out after 600s")
             if os.path.exists(config_path):
                 os.remove(config_path)
             return 0.0
             
         except Exception as e:
-            print(f"[BenchmarkWorker] ERROR: vllm bench failed with exception: {e}")
+            print(f"[ProfilingWorker] ERROR: vllm bench failed with exception: {e}")
             if os.path.exists(config_path):
                 os.remove(config_path)
             return 0.0
+
+    def run_slow_gym_validation(self, params_dict, model_name, user_goal):
+        """Legacy method for backward compatibility."""
+        return self.run_throughput_validation(params_dict, model_name, user_goal)
 
     def _parse_vllm_bench_output(self, output, goal):
         for line in output.strip().split('\n'):
@@ -393,6 +434,14 @@ class BenchmarkWorker:
                 except Exception:
                     continue
             
-        print(f"[BenchmarkWorker] ERROR: Could not parse vllM bench output.")
+        print(f"[ProfilingWorker] ERROR: Could not parse vllM bench output.")
         return 0.0
+
+    def run_fast_gym_benchmark(self, params_dict, static_args, reward_weights, num_tokens=None):
+        """Legacy method for backward compatibility."""
+        return self.run_kernel_profiling(params_dict, static_args, reward_weights, num_tokens)
+
+
+# Backward compatibility alias
+BenchmarkWorker = ProfilingWorker
 

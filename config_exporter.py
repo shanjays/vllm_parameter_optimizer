@@ -1,5 +1,9 @@
 """
-VLLMConfigSaver - Saves best kernel configs in vLLM format for fused_moe kernel.
+VLLMConfigExporter - Exports optimized kernel configurations in vLLM format.
+
+This module handles the export of best-performing kernel configurations
+discovered during the hierarchical optimization process. The output format
+is compatible with vLLM's fused_moe kernel configuration system.
 
 Output format matches vLLM's expected config:
 {
@@ -14,9 +18,13 @@ import os
 from datetime import datetime
 
 
-class VLLMConfigSaver:
+class VLLMConfigExporter:
     """
-    Saves best kernel configs in vLLM format for fused_moe kernel.
+    Exports optimized kernel configurations in vLLM format for fused_moe kernel.
+    
+    This class tracks the best-performing configurations discovered during
+    kernel optimization and exports them in the format expected by vLLM's
+    autotuning system.
     
     Output format matches vLLM's expected config:
     {
@@ -27,7 +35,7 @@ class VLLMConfigSaver:
     """
     
     # Default output directory for saving configs
-    DEFAULT_OUTPUT_DIR = "./hakt_configs"
+    DEFAULT_OUTPUT_DIR = "./optimized_configs"
     
     def __init__(self, num_experts, inter_size, device_name="NVIDIA_H100_80GB_HBM3"):
         """
@@ -89,11 +97,11 @@ class VLLMConfigSaver:
                 "num_stages": config.get("num_stages", 4)
             }
             self.best_rewards[token_key] = reward
-            print(f"[ConfigSaver] New best config for {token_count} tokens: reward={reward:.2f}")
+            print(f"[ConfigExporter] New best config for {token_count} tokens: reward={reward:.2f}")
             return True
         return False
     
-    def save_vllm_config(self, output_dir="./hakt_configs"):
+    def save_vllm_config(self, output_dir="./optimized_configs"):
         """
         Save configs in vLLM format.
         
@@ -119,7 +127,7 @@ class VLLMConfigSaver:
         vllm_path = os.path.join(output_dir, self.get_config_filename())
         with open(vllm_path, 'w') as f:
             json.dump(vllm_config, f, indent=2)
-        print(f"[ConfigSaver] Saved vLLM config to: {vllm_path}")
+        print(f"[ConfigExporter] Saved vLLM config to: {vllm_path}")
         
         # 2. Save detailed config with rewards
         detailed = {
@@ -141,13 +149,13 @@ class VLLMConfigSaver:
         detailed_path = os.path.join(output_dir, "best_configs_detailed.json")
         with open(detailed_path, 'w') as f:
             json.dump(detailed, f, indent=2)
-        print(f"[ConfigSaver] Saved detailed config to: {detailed_path}")
+        print(f"[ConfigExporter] Saved detailed config to: {detailed_path}")
         
         # 3. Save all results for analysis
         all_results_path = os.path.join(output_dir, "all_results.json")
         with open(all_results_path, 'w') as f:
             json.dump(self.all_results, f, indent=2)
-        print(f"[ConfigSaver] Saved all results to: {all_results_path}")
+        print(f"[ConfigExporter] Saved all results to: {all_results_path}")
         
         return vllm_path
     
@@ -179,7 +187,7 @@ class VLLMConfigSaver:
                     "model_executor/layers/fused_moe/configs/"
                 )
             except ImportError:
-                print("[ConfigSaver] WARNING: Could not find vLLM installation")
+                print("[ConfigExporter] WARNING: Could not find vLLM installation")
                 return None
         
         if not os.path.exists(vllm_config_dir):
@@ -191,8 +199,12 @@ class VLLMConfigSaver:
         if os.path.exists(src_path):
             import shutil
             shutil.copy2(src_path, dst_path)
-            print(f"[ConfigSaver] Copied config to vLLM: {dst_path}")
+            print(f"[ConfigExporter] Copied config to vLLM: {dst_path}")
             return dst_path
         else:
-            print(f"[ConfigSaver] WARNING: Source config not found: {src_path}")
+            print(f"[ConfigExporter] WARNING: Source config not found: {src_path}")
             return None
+
+
+# Backward compatibility alias
+VLLMConfigSaver = VLLMConfigExporter
