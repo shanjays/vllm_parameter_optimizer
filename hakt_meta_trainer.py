@@ -114,8 +114,8 @@ def main():
     # --- THIS IS THE UNSLOTH FIX ---
     # We replace the standard loader with FastLanguageModel
     # This will load the model in 4-bit and fix the OOM error.
-    # Reduced max_seq_length from 8192 to 2048 to avoid CUDA OOM errors
-    max_seq_length = 2048
+    # Increased max_seq_length from 2048 to 4096 to improve VRAM utilization (~65GB target)
+    max_seq_length = 4096
     professor_llm, tokenizer = FastLanguageModel.from_pretrained(
         model_name = PROFESSOR_MODEL,
         max_seq_length = max_seq_length,
@@ -128,15 +128,15 @@ def main():
     # --- THIS IS THE UNSLOTH FIX ---
     # We replace prepare_model_for_kbit_training and get_peft_model
     # with Unsloth's single, optimized function.
-    # Reduced LoRA rank from 128 to 32 to avoid CUDA OOM errors
+    # Increased LoRA rank from 32 to 64 for better learning with ~65GB VRAM target
     professor_llm = FastLanguageModel.get_peft_model(
         professor_llm,
-        r = 32,  # LoRA rank (reduced from 128 to save VRAM)
+        r = 64,  # LoRA rank (increased from 32 for better learning)
         target_modules = [
             "q_proj", "k_proj", "v_proj", "o_proj",
             "gate_proj", "up_proj", "down_proj",
         ],
-        lora_alpha = 64,  # Scaled with rank (reduced from 256)
+        lora_alpha = 128,  # Scaled with rank (2x LoRA rank)
         lora_dropout = 0.0,  # Use 0 for Unsloth optimization
         bias = "none",
         use_gradient_checkpointing = "unsloth",  # Unsloth's smart checkpointing
@@ -267,12 +267,12 @@ Analyze the NCU metrics and generate an optimized mission plan for the {KERNEL_T
     def hakt_reward_function_wrapper(completions, **kwargs):
         return reward_fn_object(completions, **kwargs)
 
-    # Conservative GRPOConfig settings to avoid CUDA OOM errors
-    # Memory budget with these settings: ~55GB (69% of 80GB)
+    # Optimized GRPOConfig settings for ~65GB VRAM utilization (82% of 80GB)
+    # Previous settings only used 14GB (18%) - wasteful for H100 80GB
     grpo_config = GRPOConfig(
         output_dir="hakt_professor_finetune",
-        per_device_train_batch_size=2,  # Reduced from 16 to avoid OOM
-        gradient_accumulation_steps=4,  # Effective batch size = 8
+        per_device_train_batch_size=6,  # Increased from 2 for better utilization
+        gradient_accumulation_steps=2,  # Effective batch size = 12
         learning_rate=2e-5,
         num_train_epochs=1,
         max_steps=LLM_TRAIN_STEPS,
@@ -281,9 +281,9 @@ Analyze the NCU metrics and generate an optimized mission plan for the {KERNEL_T
         report_to="tensorboard",
         remove_unused_columns=False,
         temperature=0.7,
-        max_prompt_length=1536,  # Reduced from 3900 to avoid OOM
-        max_completion_length=512,  # Reduced from 4096 to avoid OOM (key fix!)
-        num_generations=2,  # Reduced from 8 to avoid OOM
+        max_prompt_length=2048,  # Increased from 1536 for longer prompts
+        max_completion_length=1024,  # Increased from 512 (but NOT 4096 to avoid OOM)
+        num_generations=4,  # Increased from 2 for more diverse outputs
         loss_type="grpo",
     )
 
