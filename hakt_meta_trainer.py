@@ -110,9 +110,9 @@ def main():
     # --- THIS IS THE UNSLOTH FIX ---
     # We replace the standard loader with FastLanguageModel
     # This will load the model in 4-bit and fix the OOM error.
-    # Increased max_seq_length from 2048 to 4096 for better VRAM utilization on H100
-    # Note: Using 4096 instead of 8192 to balance memory usage with batch size increase
-    max_seq_length = 4096
+    # Increased max_seq_length to 8192 for better VRAM utilization on H100 80GB
+    # GPU 0 was only using ~18% VRAM, this change helps utilize 60-70GB
+    max_seq_length = 8192
     professor_llm, tokenizer = FastLanguageModel.from_pretrained(
         model_name = PROFESSOR_MODEL,
         max_seq_length = max_seq_length,
@@ -125,14 +125,16 @@ def main():
     # --- THIS IS THE UNSLOTH FIX ---
     # We replace prepare_model_for_kbit_training and get_peft_model
     # with Unsloth's single, optimized function.
+    # Increased LoRA rank to 128 (from 64) for more trainable parameters
+    # and better VRAM utilization on H100 80GB
     professor_llm = FastLanguageModel.get_peft_model(
         professor_llm,
-        r = 64, # LoRA rank
+        r = 128, # LoRA rank (increased from 64 for more trainable parameters)
         target_modules = [
             "q_proj", "k_proj", "v_proj", "o_proj",
             "gate_proj", "up_proj", "down_proj",
         ],
-        lora_alpha = 128,
+        lora_alpha = 256, # Scaled with rank (was 128)
         lora_dropout = 0.05,
         bias = "none",
         use_gradient_checkpointing = "unsloth", # Unsloth's smart checkpointing
@@ -253,10 +255,11 @@ Analyze the NCU metrics and generate an optimized mission plan for the {KERNEL_T
         return reward_fn_object(completions, **kwargs)
 
     # Increased batch sizes and completion length for better H100 VRAM utilization (60-70GB target)
+    # GPU 0 was underutilized at ~18% VRAM - these settings target 75%+ utilization
     grpo_config = GRPOConfig(
         output_dir="hakt_professor_finetune",
-        per_device_train_batch_size=8,  # Increased from 4 to 8 for better VRAM utilization
-        gradient_accumulation_steps=1,
+        per_device_train_batch_size=16,  # Increased from 8 to 16 for H100 80GB with 4-bit model
+        gradient_accumulation_steps=2,  # Added for effective batch size of 32
         learning_rate=2e-5,
         num_train_epochs=1,
         max_steps=LLM_TRAIN_STEPS,
@@ -265,9 +268,9 @@ Analyze the NCU metrics and generate an optimized mission plan for the {KERNEL_T
         report_to="tensorboard",
         remove_unused_columns=False,
         temperature=0.7,
-        max_prompt_length=2048,  # Increased from 1024 to 2048 for longer prompts
-        max_completion_length=2048,  # Increased from 1024 to 2048 for longer outputs
-        num_generations=4,
+        max_prompt_length=4096,  # Increased from 2048 to 4096 for longer prompts
+        max_completion_length=4096,  # Increased from 2048 to 4096 for longer reasoning
+        num_generations=8,  # Increased from 4 to 8 for better GRPO exploration
         loss_type="grpo",
     )
 
