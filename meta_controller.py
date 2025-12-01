@@ -272,6 +272,27 @@ class MetaControllerReward:
         # Pre-clean reward arrays w/ annotation before locating braces
         llm_output_str = self._preclean_reward_arrays(llm_output_str)
 
+        # Check for verbose reasoning patterns (LLM thinking out loud)
+        verbose_patterns = [
+            r'^We are',
+            r'^I am',
+            r'^Let me',
+            r'^Let\'s',
+            r'^First,',
+            r'^Looking at',
+            r'^Based on',
+            r'^Analyzing',
+            r'^The data shows',
+            r'^We need to',
+            r'^We have',
+        ]
+        output_start = llm_output_str.strip()[:50].lower()
+        is_verbose = any(re.match(pattern, output_start, re.IGNORECASE) for pattern in verbose_patterns)
+        
+        if is_verbose and '<param>' not in llm_output_str.lower():
+            print("[MetaController] WARNING: LLM output contains verbose reasoning without <param> tags, using default policy")
+            return self._default_safe_policy()
+
         # Check if output appears truncated (no <param> tags found and ends mid-sentence)
         if '<param>' not in llm_output_str.lower():
             stripped = llm_output_str.rstrip()

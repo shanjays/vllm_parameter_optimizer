@@ -214,9 +214,14 @@ class FeedbackCollector:
                 if len(self.failed_strategies) < 4:
                     self.failed_strategies.append(strategy)
     
-    def format_feedback_for_prompt(self) -> str:
+    def format_feedback_for_prompt(self, max_configs: int = 3) -> str:
         """
         Generate formatted feedback string for injection into the LLM prompt.
+        
+        Returns concise bullet points to prevent verbose LLM output.
+        
+        Args:
+            max_configs: Maximum number of best configs to include (default 3)
         
         Returns:
             Formatted string containing feedback from previous iterations.
@@ -227,58 +232,21 @@ class FeedbackCollector:
         
         lines = []
         
-        # Header
-        lines.append("=== FEEDBACK FROM PREVIOUS ITERATIONS ===")
-        lines.append(f"Policies evaluated so far: {self.policies_evaluated}")
-        lines.append(f"Best overall reward achieved: {self.best_overall_reward:.2f}")
-        lines.append("")
+        # Concise header
+        lines.append(f"Previous Results ({self.policies_evaluated} policies tested):")
+        lines.append(f"- Best reward: {self.best_overall_reward:.1f}")
         
-        # Best configurations by token count
+        # Top configs only (limited to max_configs)
         if self.best_configs_by_token:
-            lines.append("=== BEST CONFIGURATIONS FOUND ===")
-            for token_count in sorted(self.best_configs_by_token.keys()):
-                config_data = self.best_configs_by_token[token_count]
+            lines.append("- Best configs found:")
+            sorted_configs = sorted(self.best_configs_by_token.items(), key=lambda x: int(x[0]))
+            for token_count, config_data in sorted_configs[:max_configs]:
                 config = config_data.get("config", {})
-                config_reward = config_data.get("reward", 0)
-                
-                config_str = ", ".join([
-                    f"M={config.get('BLOCK_SIZE_M', '?')}",
-                    f"N={config.get('BLOCK_SIZE_N', '?')}",
-                    f"K={config.get('BLOCK_SIZE_K', '?')}",
-                    f"warps={config.get('num_warps', '?')}",
-                    f"stages={config.get('num_stages', '?')}"
-                ])
-                lines.append(f"  Token {token_count}: reward={config_reward:.2f}, {config_str}")
-            lines.append("")
+                lines.append(f"  Token {token_count}: M={config.get('BLOCK_SIZE_M', '?')}, N={config.get('BLOCK_SIZE_N', '?')}, stages={config.get('num_stages', '?')}")
         
-        # Best policy weights
-        if self.best_policy_weights:
-            lines.append("=== BEST POLICY WEIGHTS ===")
-            for key, value in sorted(self.best_policy_weights.items()):
-                lines.append(f"  {key}: {value:.3f}")
-            lines.append("")
-        
-        # What worked
+        # Key insight (only the most recent successful strategy)
         if self.successful_strategies:
-            lines.append("=== WHAT WORKED ===")
-            for strategy in self.successful_strategies:
-                lines.append(f"  ✓ {strategy}")
-            lines.append("")
-        
-        # What didn't work
-        if self.failed_strategies:
-            lines.append("=== WHAT DIDN'T WORK ===")
-            for strategy in self.failed_strategies:
-                lines.append(f"  ✗ {strategy}")
-            lines.append("")
-        
-        # Guidance for next iteration
-        lines.append("=== YOUR TASK ===")
-        lines.append("Generate an IMPROVED policy that:")
-        lines.append("  1. Builds on the successful strategies above")
-        lines.append("  2. Avoids the approaches that didn't work")
-        lines.append(f"  3. Tries to beat the best reward of {self.best_overall_reward:.2f}")
-        lines.append("")
+            lines.append(f"- What worked: {self.successful_strategies[-1]}")
         
         return "\n".join(lines)
     
