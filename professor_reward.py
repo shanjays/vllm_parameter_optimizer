@@ -18,7 +18,7 @@ DEFAULT_TOKEN_COUNTS = [
 ]
 
 # Minimum training steps per token count to ensure meaningful exploration
-MIN_STEPS_PER_TOKEN = 10
+MIN_STEPS_PER_TOKEN = 8  # Reduced from 10 for faster iteration
 
 # Number of top results to collect per token count
 RESULTS_PER_TOKEN = 3
