@@ -176,14 +176,40 @@ class ExplorationAgent:
         if load_existing and os.path.exists(self.model_path):
             print(f"[ExplorationAgent] Loading existing model from {self.model_path}")
             try:
-                self.model = PPO.load(
-                    self.model_path,
-                    env=self.env,
-                    device=device,
-                    tensorboard_log=self.log_dir,
-                )
-                print(f"[ExplorationAgent] Model loaded successfully!")
-                self._load_best_reward()
+                # First check if action spaces match by loading without environment
+                loaded_model = PPO.load(self.model_path, env=None, device=device)
+                
+                # Get action space dimensions
+                current_action_space = self.env.action_space
+                
+                # Check if they're compatible
+                if hasattr(loaded_model, 'action_space'):
+                    saved_action_space = loaded_model.action_space
+                    if str(saved_action_space) != str(current_action_space):
+                        print(f"[ExplorationAgent] Action space changed: {saved_action_space} -> {current_action_space}")
+                        print(f"[ExplorationAgent] Creating new model (can't reuse old weights)")
+                        self._create_new_model(device)
+                    else:
+                        # Action spaces match, load with environment
+                        self.model = PPO.load(
+                            self.model_path,
+                            env=self.env,
+                            device=device,
+                            tensorboard_log=self.log_dir,
+                        )
+                        print(f"[ExplorationAgent] Model loaded successfully!")
+                        self._load_best_reward()
+                else:
+                    # Can't check, try loading directly
+                    self.model = PPO.load(
+                        self.model_path,
+                        env=self.env,
+                        device=device,
+                        tensorboard_log=self.log_dir,
+                    )
+                    print(f"[ExplorationAgent] Model loaded successfully!")
+                    self._load_best_reward()
+                    
             except Exception as e:
                 print(f"[ExplorationAgent] Failed to load: {e}, creating new")
                 self._create_new_model(device)

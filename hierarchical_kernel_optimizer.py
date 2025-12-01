@@ -140,64 +140,40 @@ def build_optimization_prompt(initial_ncu_report, feedback_collector=None):
     if feedback_collector:
         feedback_section = feedback_collector.format_feedback_for_prompt()
     
-    optimization_prompt = f"""You are an AGGRESSIVE CUDA kernel optimization expert. Your goal is to find the FASTEST possible fused_moe kernel configurations for maximum throughput.
+    optimization_prompt = f"""You are a CUDA kernel optimization expert. Generate an optimization policy for fused_moe kernel.
 
-=== TARGET MODEL ===
-{MODEL_NAME}
-Experts: {STATIC_BENCHMARK_ARGS['num_experts']}, Intermediate Size: {STATIC_BENCHMARK_ARGS['inter_size']}, Top-K: {STATIC_BENCHMARK_ARGS['top_k']}
+TARGET: {MODEL_NAME} | Experts: {STATIC_BENCHMARK_ARGS['num_experts']} | Inter: {STATIC_BENCHMARK_ARGS['inter_size']} | Top-K: {STATIC_BENCHMARK_ARGS['top_k']}
+HARDWARE: NVIDIA H100 80GB HBM3 | Shared Memory: 227KB
 
-=== HARDWARE ===
-NVIDIA H100 80GB HBM3
-Shared Memory: 227KB per SM (232,448 bytes)
-Target: Push configs to the EDGE of hardware limits!
+TOKEN COUNTS: {token_counts_str}
 
-=== TOKEN COUNTS TO OPTIMIZE ===
-You are optimizing for these specific token batch sizes:
-{token_counts_str}
-
-Each token count needs different optimal parameters:
-- Small batches (1-16): May prefer smaller blocks, fewer stages
-- Medium batches (64-512): Balance between parallelism and efficiency  
-- Large batches (1024+): Maximize throughput with larger blocks
-
-=== INITIAL PROFILING METRICS ===
+INITIAL METRICS:
 {initial_ncu_report}
 
-{feedback_section}=== OPTIMIZATION POLICY FORMAT ===
-Output your policy inside <param></param> tags as JSON:
+{feedback_section}IMPORTANT RULES:
+1. Output ONLY the <param>JSON</param> block - NO lengthy reasoning!
+2. Each search_space array MUST have AT LEAST 2 values
+3. Keep output under 200 tokens
 
 <param>
 {{
   "objective_weights": {{
-    "R_sm_throughput": <0.0-1.0>,
-    "R_dram_throughput": <0.0-1.0>,
-    "R_l1_hit_rate": <0.0-1.0>,
-    "R_l2_hit_rate": <0.0-1.0>
+    "R_sm_throughput": 0.4,
+    "R_dram_throughput": 0.35,
+    "R_l1_hit_rate": 0.125,
+    "R_l2_hit_rate": 0.125
   }},
   "search_space": {{
-    "BLOCK_SIZE_M": [<values from 16,32,64,128>],
-    "BLOCK_SIZE_N": [<values from 32,64,128>],
-    "BLOCK_SIZE_K": [<values from 32,64>],
-    "num_warps": [<values from 4,8,16>],
-    "num_stages": [<values from 2,3,4,5>]
+    "BLOCK_SIZE_M": [64, 128],
+    "BLOCK_SIZE_N": [64, 128],
+    "BLOCK_SIZE_K": [32, 64],
+    "num_warps": [8, 16],
+    "num_stages": [3, 4, 5]
   }}
 }}
 </param>
 
-=== 🔥 BE AGGRESSIVE! 🔥 ===
-- Configs that occasionally hit VRAM limits are GOOD - they show we're pushing boundaries!
-- LARGER block sizes generally = BETTER throughput
-- MORE pipeline stages = BETTER memory hiding (up to VRAM limits)
-- num_stages=5 is allowed for aggressive testing!
-- If configs never fail, you're being TOO CONSERVATIVE!
-- Target: 90%+ GPU memory utilization
-
-=== STRATEGY ===
-1. Prioritize SM throughput (weight 0.4-0.5) - this is compute bound
-2. Secondary: DRAM throughput (weight 0.3-0.4) - memory bandwidth matters
-3. Cache hit rates are less critical for MoE (weight 0.1-0.15 each)
-
-Output minimal reasoning statergy in 4 lines and the <param>JSON</param> block only. 
+NOW OUTPUT YOUR OPTIMIZED POLICY (only <param>JSON</param>, no explanation):
 """
     return optimization_prompt
 

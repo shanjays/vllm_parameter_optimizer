@@ -272,6 +272,13 @@ class MetaControllerReward:
         # Pre-clean reward arrays w/ annotation before locating braces
         llm_output_str = self._preclean_reward_arrays(llm_output_str)
 
+        # Check if output appears truncated (no <param> tags found and ends mid-sentence)
+        if '<param>' not in llm_output_str.lower():
+            stripped = llm_output_str.rstrip()
+            if stripped and not stripped.endswith(('.', '>', '}', ']', '"')):
+                print("[MetaController] WARNING: LLM output appears truncated (no <param> tags, ends mid-sentence), using default policy")
+                return self._default_safe_policy()
+
         # Try to extract content from <param></param> XML tags first (preferred format)
         # Use non-greedy match for the JSON content and handle any garbage before <param>
         param_match = re.search(r'<param>\s*(\{[\s\S]*?\})\s*</param>', llm_output_str, re.DOTALL | re.IGNORECASE)
@@ -580,14 +587,40 @@ class MetaControllerReward:
         for key in ["BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "num_stages"]:
             ss[key] = list(set(ss[key])) or ([64] if "BLOCK" in key else [4])
         
-        # Ensure search space has at least 2 combinations for PPO exploration
+        # AFTER coercing all values, ensure minimum combinations
+        MIN_COMBINATIONS = 8  # Need at least 8 for meaningful PPO exploration
+        MIN_VALUES_PER_DIM = 2  # Each dimension needs at least 2 values
+        
+        # Default values to expand narrow search spaces
+        defaults = {
+            "BLOCK_SIZE_M": [64, 128],
+            "BLOCK_SIZE_N": [64, 128],
+            "BLOCK_SIZE_K": [32, 64],
+            "num_warps": [8, 16],
+            "num_stages": [3, 4, 5],
+        }
+        
+        # Ensure each dimension has at least 2 values
+        for key in ["BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "num_warps", "num_stages"]:
+            if len(ss[key]) < MIN_VALUES_PER_DIM:
+                # Merge with defaults, remove duplicates
+                ss[key] = list(set(ss[key] + defaults[key]))[:3]
+                print(f"[MetaController] Expanded {key} to {ss[key]} (was too narrow)")
+        
+        # Calculate total combinations
         total_combinations = 1
         for values in ss.values():
             total_combinations *= len(values)
         
-        if total_combinations < 2:
-            print(f"[MetaController] WARNING: Search space too small ({total_combinations} combinations), using default")
+        if total_combinations < MIN_COMBINATIONS:
+            print(f"[MetaController] WARNING: Only {total_combinations} combinations, expanding search space")
+            # Use full default search space
             ss = {k: list(v) for k, v in DEFAULT_OPTIMIZATION_POLICY["search_space"].items()}
+            total_combinations = 1
+            for values in ss.values():
+                total_combinations *= len(values)
+        
+        print(f"[MetaController] Search space has {total_combinations} combinations")
         
         return {"objective_weights": rf, "search_space": ss}
 
