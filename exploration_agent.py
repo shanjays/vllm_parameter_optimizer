@@ -107,17 +107,20 @@ class EarlyStoppingCallback(BaseCallback):
         Returns:
             True to continue training, False to stop early
         """
-        if len(self.locals.get('infos', [])) > 0:
-            reward = self.locals['infos'][0].get('reward', 0)
-            if reward > self.best_reward + self.min_delta:
-                self.best_reward = reward
-                self.no_improvement_count = 0
-            else:
-                self.no_improvement_count += 1
-            if self.no_improvement_count >= self.patience:
-                if self.verbose > 0:
-                    print(f"[EarlyStopping] Stopping after {self.patience} steps without improvement")
-                return False
+        infos = self.locals.get('infos', [])
+        if infos and isinstance(infos, list) and len(infos) > 0:
+            info = infos[0]
+            if isinstance(info, dict):
+                reward = info.get('reward', 0)
+                if reward > self.best_reward + self.min_delta:
+                    self.best_reward = reward
+                    self.no_improvement_count = 0
+                else:
+                    self.no_improvement_count += 1
+                if self.no_improvement_count >= self.patience:
+                    if self.verbose > 0:
+                        print(f"[EarlyStopping] Stopping after {self.patience} steps without improvement")
+                    return False
         return True
 
 
