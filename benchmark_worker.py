@@ -21,6 +21,11 @@ PENALTY_TIMEOUT = -75.0
 PENALTY_PARSE_ERROR = -25.0
 PENALTY_TOTAL_FAILURE = -100.0
 
+# Retry configuration
+DEFAULT_MAX_RETRIES = 2
+DEFAULT_RETRY_DELAY = 1  # seconds between retries
+DEFAULT_NCU_TIMEOUT = 60  # seconds, increased from 30 to accommodate longer kernel runs
+
 @ray.remote(num_gpus=1) # This actor requires 1 GPU from Ray's pool
 class BenchmarkWorker:
     def __init__(self, gpu_id):
@@ -29,7 +34,9 @@ class BenchmarkWorker:
         self.ncu_log_path = f"/tmp/hakt_ncu_log_gpu{self.gpu_id}_{pid}.csv"
         self.temp_config_path = f"/tmp/hakt_temp_config_gpu{self.gpu_id}_{pid}.json"
         self.failed_configs = []  # Track failed configs for analysis
-        self.max_retries = 2  # Number of retries before giving up
+        self.max_retries = DEFAULT_MAX_RETRIES
+        self.retry_delay = DEFAULT_RETRY_DELAY
+        self.ncu_timeout = DEFAULT_NCU_TIMEOUT
         
         try:
             import vllm
@@ -191,7 +198,7 @@ class BenchmarkWorker:
         for attempt in range(self.max_retries):
             if attempt > 0:
                 print(f"[BenchmarkWorker] Retry attempt {attempt + 1}/{self.max_retries}")
-                time.sleep(1)  # Brief pause between retries
+                time.sleep(self.retry_delay)
             
             with open(self.temp_config_path, "w") as f:
                 json.dump(config_to_use, f)
@@ -228,7 +235,7 @@ class BenchmarkWorker:
                     check=True, 
                     capture_output=True, 
                     text=True, 
-                    timeout=60,  # Increased timeout
+                    timeout=self.ncu_timeout,
                     env=env
                 )
                 # Success! Break out of retry loop
