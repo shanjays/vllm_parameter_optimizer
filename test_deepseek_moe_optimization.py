@@ -78,6 +78,9 @@ DEFAULT_SEARCH_SPACE = {
 # H100 hardware limits
 H100_SHARED_MEM_LIMIT = 232448  # bytes (~227KB)
 
+# Data type sizes
+FP16_BYTES = 2  # bytes per FP16 element
+
 
 class DeepSeekMoEOptimizer:
     """
@@ -168,8 +171,8 @@ class DeepSeekMoEOptimizer:
         K = config.get("BLOCK_SIZE_K", 32)
         stages = config.get("num_stages", 4)
         
-        # FP16 = 2 bytes per element
-        shared_mem = (M * K + K * N) * 2 * stages
+        # Calculate shared memory usage
+        shared_mem = (M * K + K * N) * FP16_BYTES * stages
         
         if shared_mem > H100_SHARED_MEM_LIMIT:
             return False
@@ -719,10 +722,11 @@ def run_vllm_benchmark(
             if line.startswith("Throughput:"):
                 try:
                     parts = line.split(',')
-                    output_tok_s = parts[2].strip().split(' ')[0]
-                    throughput = float(output_tok_s)
-                    print(f"  Throughput: {throughput:.2f} tokens/sec")
-                    return throughput
+                    if len(parts) > 2:
+                        output_tok_s = parts[2].strip().split(' ')[0]
+                        throughput = float(output_tok_s)
+                        print(f"  Throughput: {throughput:.2f} tokens/sec")
+                        return throughput
                 except (IndexError, ValueError):
                     pass
         
