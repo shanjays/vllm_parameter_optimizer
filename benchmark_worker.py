@@ -329,7 +329,9 @@ class BenchmarkWorker:
             "--num-prompts", "200", 
             "--trust-remote-code",
             "--enforce-eager", 
-            "--tensor-parallel-size", "1"
+            "--tensor-parallel-size", "1",
+            "--max-model-len", "8192", 
+            "--gpu-memory-utilization", "0.97"
         ]
         
         try:
@@ -362,3 +364,4 @@ class BenchmarkWorker:
             
         print(f"[BenchmarkWorker] ERROR: Could not parse vllM bench output.")
         return 0.0
+
