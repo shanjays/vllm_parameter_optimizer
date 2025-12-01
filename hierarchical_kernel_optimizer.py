@@ -295,37 +295,9 @@ def main():
         loss_type="grpo",
     )
 
-    # Create a dynamic dataset that regenerates prompts with feedback
-    # Each training step will get a fresh prompt with the latest feedback
-    class DynamicPromptDataset:
-        """Dataset that regenerates prompts with fresh feedback each access."""
-        
-        def __init__(self, initial_ncu_report, feedback_collector, num_steps):
-            self.initial_ncu_report = initial_ncu_report
-            self.feedback_collector = feedback_collector
-            self.num_steps = num_steps
-            
-        def __len__(self):
-            return self.num_steps
-            
-        def __getitem__(self, idx):
-            # Generate fresh prompt with current feedback
-            prompt = build_optimization_prompt(
-                self.initial_ncu_report, 
-                self.feedback_collector
-            )
-            return {"prompt": prompt}
-    
-    # Create dynamic dataset
-    dynamic_dataset = DynamicPromptDataset(
-        initial_ncu_report=initial_ncu_report,
-        feedback_collector=feedback_collector,
-        num_steps=META_LEARNING_STEPS
-    )
-    
-    # Convert to HuggingFace Dataset format
-    # Note: We need to use a static snapshot since HF Dataset doesn't support dynamic generation
-    # The feedback will be updated in the reward function and reflected in subsequent prompts
+    # Create dataset with prompts that include contextual feedback
+    # Note: HuggingFace Dataset uses static snapshots, but feedback will be recorded
+    # after each policy evaluation and persisted for use in subsequent training runs
     dataset = Dataset.from_list([{"prompt": build_optimization_prompt(initial_ncu_report, feedback_collector)}] * META_LEARNING_STEPS)
 
     trainer = GRPOTrainer(

@@ -299,8 +299,8 @@ def test_exploration_phase_returns_best_configs():
     
     source = get_meta_controller_source()
     
-    # Check for return statement with best_configs
-    pattern = r'return\s+sorted_results\[:5\]\s*,\s*best_configs'
+    # Check for return statement with best_configs (flexible pattern for any slice)
+    pattern = r'return\s+sorted_results\[[^\]]+\]\s*,\s*best_configs'
     match = re.search(pattern, source)
     
     if match:

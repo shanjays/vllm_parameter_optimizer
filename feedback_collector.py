@@ -345,7 +345,8 @@ class FeedbackCollector:
         
         try:
             # Ensure directory exists
-            os.makedirs(os.path.dirname(self.state_file) if os.path.dirname(self.state_file) else '.', exist_ok=True)
+            dir_path = os.path.dirname(self.state_file) or '.'
+            os.makedirs(dir_path, exist_ok=True)
             
             with open(self.state_file, 'w') as f:
                 json.dump(data, f, indent=2)
