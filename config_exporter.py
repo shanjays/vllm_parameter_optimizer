@@ -178,6 +178,62 @@ class VLLMConfigExporter:
             "config_filename": self.get_config_filename()
         }
     
+    def export_visualization_data(self):
+        """
+        Export training metrics in visualization-friendly format.
+        
+        Returns:
+            Dict containing visualization-friendly data structures including:
+            - steps: List of experiment indices
+            - rewards: List of reward values
+            - token_counts: List of token counts
+            - timestamps: List of ISO timestamps
+            - configs: List of configuration dicts
+            - metrics: List of NCU metrics dicts
+            - cumulative_stats: Dict with running statistics
+        """
+        if not self.all_results:
+            return {
+                'steps': [],
+                'rewards': [],
+                'token_counts': [],
+                'timestamps': [],
+                'configs': [],
+                'metrics': [],
+                'cumulative_stats': {
+                    'total_experiments': 0,
+                    'best_reward_by_token': {},
+                    'mean_reward': None,
+                }
+            }
+        
+        steps = list(range(len(self.all_results)))
+        rewards = [r.get('reward', 0) for r in self.all_results]
+        token_counts = [r.get('token_count') for r in self.all_results]
+        timestamps = [r.get('timestamp') for r in self.all_results]
+        configs = [r.get('config', {}) for r in self.all_results]
+        metrics = [r.get('metrics', {}) for r in self.all_results]
+        
+        # Compute cumulative statistics
+        valid_rewards = [r for r in rewards if r is not None]
+        cumulative_stats = {
+            'total_experiments': len(self.all_results),
+            'best_reward_by_token': self.best_rewards.copy(),
+            'mean_reward': sum(valid_rewards) / len(valid_rewards) if valid_rewards else None,
+            'best_reward': max(valid_rewards) if valid_rewards else None,
+            'min_reward': min(valid_rewards) if valid_rewards else None,
+        }
+        
+        return {
+            'steps': steps,
+            'rewards': rewards,
+            'token_counts': token_counts,
+            'timestamps': timestamps,
+            'configs': configs,
+            'metrics': metrics,
+            'cumulative_stats': cumulative_stats,
+        }
+    
     def export_complete_config(self, output_path=None):
         """
         Export config with ALL token counts, interpolating missing ones.
