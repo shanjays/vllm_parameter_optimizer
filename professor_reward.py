@@ -11,6 +11,23 @@ from benchmark_worker import BenchmarkWorker
 
 POWER_OF_TWO_WARPS = (2, 4, 8, 16, 32)
 
+# Default mission plan with multiple options for PPO exploration
+DEFAULT_MISSION_PLAN = {
+    "reward_function": {
+        "R_sm_throughput": 0.4,
+        "R_dram_throughput": 0.3,
+        "R_l1_hit_rate": 0.15,
+        "R_l2_hit_rate": 0.15
+    },
+    "pruned_action_space": {
+        "BLOCK_SIZE_M": [32, 64, 128],
+        "BLOCK_SIZE_N": [32, 64, 128],
+        "BLOCK_SIZE_K": [32, 64],
+        "num_warps": [4, 8, 16],
+        "num_stages": [2, 3, 4]
+    }
+}
+
 # Default token counts to test (matching vLLM's expected format)
 DEFAULT_TOKEN_COUNTS = [
     1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024, 
@@ -110,6 +127,7 @@ class HAKT_Reward_Function:
 
     def _run_default_penalty_plan(self, idx):
         print("[RewardFn] Plan failed. Running Fast Loop on default, penalized plan to ensure training progression.")
+        # Use DEFAULT_MISSION_PLAN to ensure action space > 1 for exploration
         default_plan = {
             "reward_function": {
                 "R_sm_throughput": 0.01,
@@ -117,13 +135,7 @@ class HAKT_Reward_Function:
                 "R_l1_hit_rate": 0.0,
                 "R_l2_hit_rate": 0.0
             },
-            "pruned_action_space": {
-                "BLOCK_SIZE_M": [64],
-                "BLOCK_SIZE_N": [64],
-                "BLOCK_SIZE_K": [32],
-                "num_warps": [4],
-                "num_stages": [4]
-            }
+            "pruned_action_space": DEFAULT_MISSION_PLAN["pruned_action_space"].copy()
         }
         path = f"temp_default_plan_{int(time.time())}_{idx}.json"
         try:
@@ -195,39 +207,56 @@ class HAKT_Reward_Function:
         llm_output_str = self._preclean_reward_arrays(llm_output_str)
 
         # Try to extract content from <param></param> XML tags first (preferred format)
-        param_match = re.search(r'<param>\s*(.*?)\s*</param>', llm_output_str, re.DOTALL | re.IGNORECASE)
+        # Use non-greedy match for the JSON content and handle any garbage before <param>
+        param_match = re.search(r'<param>\s*(\{[\s\S]*?\})\s*</param>', llm_output_str, re.DOTALL | re.IGNORECASE)
         if param_match:
             json_str = param_match.group(1).strip()
-            print("[RewardFn] Found content within <param> tags.")
+            print("[RewardFn] Found JSON content within <param> tags.")
         else:
-            # Fallback: Try to find JSON-like content after <param> (for truncated output)
-            param_start_match = re.search(r'<param>\s*(\{.*)', llm_output_str, re.DOTALL | re.IGNORECASE)
-            if param_start_match:
-                json_str = param_start_match.group(1).strip()
-                print("[RewardFn] Found truncated content after <param> tag, attempting recovery.")
-                # Try to fix truncated JSON
-                recovered_json = self._fix_truncated_json(json_str)
-                if recovered_json is not None:
-                    return recovered_json
+            # Fallback: Try to find any content between <param> tags 
+            param_any_match = re.search(r'<param>\s*(.*?)\s*</param>', llm_output_str, re.DOTALL | re.IGNORECASE)
+            if param_any_match:
+                content = param_any_match.group(1).strip()
+                # Check if it starts with { (JSON object)
+                if content.startswith('{'):
+                    json_str = content
+                    print("[RewardFn] Found content within <param> tags.")
+                else:
+                    # Content inside tags but not JSON-like
+                    print(f"[RewardFn] WARNING: Content in <param> tags is not JSON-like, using fallback")
+                    json_str = None
+            else:
+                json_str = None
             
-            # Fallback to brace matching
-            match = re.search(r'(\{.*\})', llm_output_str, re.DOTALL)
-            if not match:
-                # Try to recover from truncated output without closing brace
-                match_partial = re.search(r'(\{.*)', llm_output_str, re.DOTALL)
-                if match_partial:
-                    json_str = match_partial.group(1).strip()
-                    print("[RewardFn] Found partial JSON, attempting recovery.")
-                    recovered_json = self._fix_truncated_json(json_str)
+            if json_str is None:
+                # Fallback: Try to find JSON-like content after <param> (for truncated output)
+                param_start_match = re.search(r'<param>\s*(\{.*)', llm_output_str, re.DOTALL | re.IGNORECASE)
+                if param_start_match:
+                    json_str = param_start_match.group(1).strip()
+                    print("[RewardFn] Found truncated content after <param> tag, attempting recovery.")
+                    # Try to fix truncated JSON
+                    recovered_json = self._try_recover_json(json_str)
                     if recovered_json is not None:
                         return recovered_json
                 
-                salvage = self._try_salvage_plan(llm_output_str)
-                if salvage is not None:
-                    return salvage
-                print("[RewardFn] No braces found; using default-safe plan for this completion.")
-                return self._default_safe_plan()
-            json_str = match.group(0).strip()
+                # Fallback to brace matching
+                match = re.search(r'(\{.*\})', llm_output_str, re.DOTALL)
+                if not match:
+                    # Try to recover from truncated output without closing brace
+                    match_partial = re.search(r'(\{.*)', llm_output_str, re.DOTALL)
+                    if match_partial:
+                        json_str = match_partial.group(1).strip()
+                        print("[RewardFn] Found partial JSON, attempting recovery.")
+                        recovered_json = self._try_recover_json(json_str)
+                        if recovered_json is not None:
+                            return recovered_json
+                    
+                    salvage = self._try_salvage_plan(llm_output_str)
+                    if salvage is not None:
+                        return salvage
+                    print("[RewardFn] No braces found; using default-safe plan for this completion.")
+                    return self._default_safe_plan()
+                json_str = match.group(0).strip()
 
         json_str = json_str.replace('```json', '').replace('```', '').strip()
 
@@ -287,6 +316,19 @@ class HAKT_Reward_Function:
                 except Exception:
                     return self._default_safe_plan()
 
+    def _try_recover_json(self, json_str):
+        """
+        Try to recover a valid dict from a potentially truncated JSON string.
+        Returns a dict if successful, None otherwise.
+        """
+        recovered_json = self._fix_truncated_json(json_str)
+        if recovered_json is not None:
+            if isinstance(recovered_json, dict):
+                return recovered_json
+            else:
+                print(f"[RewardFn] WARNING: Recovered JSON is {type(recovered_json)}, expected dict")
+        return None
+
     def _fix_truncated_json(self, json_str):
         """Attempt to fix truncated JSON by adding missing brackets."""
         # Count brackets
@@ -320,19 +362,11 @@ class HAKT_Reward_Function:
                 return None
 
     def _default_safe_plan(self):
+        """Return a safe default plan with multiple options for exploration."""
         return {
-            "reward_function": {
-                "R_sm_throughput": 0.5,
-                "R_dram_throughput": 0.0,
-                "R_l1_hit_rate": 0.0,
-                "R_l2_hit_rate": 0.0
-            },
+            "reward_function": DEFAULT_MISSION_PLAN["reward_function"].copy(),
             "pruned_action_space": {
-                "BLOCK_SIZE_M": [64],
-                "BLOCK_SIZE_N": [64],
-                "BLOCK_SIZE_K": [32],
-                "num_warps": [4],
-                "num_stages": [4]
+                k: list(v) for k, v in DEFAULT_MISSION_PLAN["pruned_action_space"].items()
             }
         }
 
@@ -380,8 +414,17 @@ class HAKT_Reward_Function:
         return None
 
     def _validate_and_coerce_plan(self, plan):
-        if not isinstance(plan, dict):
-            raise ValueError("Plan is not a dict.")
+        """Validate and coerce the mission plan, using defaults for missing/invalid values."""
+        # If plan is None or not a dict, use default
+        if plan is None or not isinstance(plan, dict):
+            print("[RewardFn] WARNING: Invalid plan (None or not dict), using default mission plan")
+            return {
+                "reward_function": DEFAULT_MISSION_PLAN["reward_function"].copy(),
+                "pruned_action_space": {
+                    k: list(v) for k, v in DEFAULT_MISSION_PLAN["pruned_action_space"].items()
+                }
+            }
+            
         rf = plan.get("reward_function", {})
         if not isinstance(rf, dict):
             rf = {}
@@ -396,12 +439,21 @@ class HAKT_Reward_Function:
                 return float(v)
             except Exception:
                 return 0.0
-        for k in ("R_sm_throughput", "R_dram_throughput", "R_l1_hit_rate", "R_l2_hit_rate"):
-            rf[k] = _scalar(rf.get(k, 0.0))
+        
+        # Ensure all required reward keys are present
+        required_keys = ["R_sm_throughput", "R_dram_throughput", "R_l1_hit_rate", "R_l2_hit_rate"]
+        for k in required_keys:
+            rf[k] = _scalar(rf.get(k, DEFAULT_MISSION_PLAN["reward_function"].get(k, 0.0)))
+        
+        # Normalize weights to sum to 1.0 if total > 0
+        total = sum(rf.values())
+        if total > 0:
+            rf = {k: v / total for k, v in rf.items()}
 
         pas = plan.get("pruned_action_space", {})
-        if not isinstance(pas, dict):
-            pas = {}
+        if not isinstance(pas, dict) or not pas:
+            pas = {k: list(v) for k, v in DEFAULT_MISSION_PLAN["pruned_action_space"].items()}
+            
         def _coerce_list(v, default):
             if isinstance(v, list):
                 out = []
@@ -417,11 +469,13 @@ class HAKT_Reward_Function:
                 return [int(v)]
             except Exception:
                 return [default]
-        pas["BLOCK_SIZE_M"] = _coerce_list(pas.get("BLOCK_SIZE_M", [64]), 64)
-        pas["BLOCK_SIZE_N"] = _coerce_list(pas.get("BLOCK_SIZE_N", [64]), 64)
-        pas["BLOCK_SIZE_K"] = _coerce_list(pas.get("BLOCK_SIZE_K", [32]), 32)
-        pas["num_warps"]    = _coerce_list(pas.get("num_warps", [4]), 4)
-        pas["num_stages"]   = _coerce_list(pas.get("num_stages", [4]), 4)
+        
+        # Get default values from DEFAULT_MISSION_PLAN
+        pas["BLOCK_SIZE_M"] = _coerce_list(pas.get("BLOCK_SIZE_M", DEFAULT_MISSION_PLAN["pruned_action_space"]["BLOCK_SIZE_M"]), 64)
+        pas["BLOCK_SIZE_N"] = _coerce_list(pas.get("BLOCK_SIZE_N", DEFAULT_MISSION_PLAN["pruned_action_space"]["BLOCK_SIZE_N"]), 64)
+        pas["BLOCK_SIZE_K"] = _coerce_list(pas.get("BLOCK_SIZE_K", DEFAULT_MISSION_PLAN["pruned_action_space"]["BLOCK_SIZE_K"]), 32)
+        pas["num_warps"]    = _coerce_list(pas.get("num_warps", DEFAULT_MISSION_PLAN["pruned_action_space"]["num_warps"]), 4)
+        pas["num_stages"]   = _coerce_list(pas.get("num_stages", DEFAULT_MISSION_PLAN["pruned_action_space"]["num_stages"]), 4)
         # Enforce power-of-two warps
         pas["num_warps"] = [w for w in pas["num_warps"] if w in POWER_OF_TWO_WARPS] or [4]
         
@@ -441,6 +495,15 @@ class HAKT_Reward_Function:
         # Remove duplicates and ensure non-empty lists
         for key in ["BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "num_stages"]:
             pas[key] = list(set(pas[key])) or ([64] if "BLOCK" in key else [4])
+        
+        # Ensure action space has at least 2 combinations for PPO exploration
+        total_combinations = 1
+        for values in pas.values():
+            total_combinations *= len(values)
+        
+        if total_combinations < 2:
+            print(f"[RewardFn] WARNING: Action space too small ({total_combinations} combinations), using default")
+            pas = {k: list(v) for k, v in DEFAULT_MISSION_PLAN["pruned_action_space"].items()}
         
         return {"reward_function": rf, "pruned_action_space": pas}
 

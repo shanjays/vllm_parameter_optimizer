@@ -34,19 +34,30 @@ class FastGymEnv(gym.Env):
 
     def set_mission_plan(self, mission_plan_path):
         """Called by the supervisor to update the plan between epochs."""
+        # Default fallback plan with multiple options for exploration
+        DEFAULT_FALLBACK_PLAN = {
+            'reward_function': {
+                'R_sm_throughput': 0.4,
+                'R_dram_throughput': 0.3,
+                'R_l1_hit_rate': 0.15,
+                'R_l2_hit_rate': 0.15
+            }, 
+            'pruned_action_space': {
+                'BLOCK_SIZE_M': [32, 64, 128], 
+                'BLOCK_SIZE_N': [32, 64, 128], 
+                'BLOCK_SIZE_K': [32, 64],
+                'num_warps': [4, 8, 16], 
+                'num_stages': [2, 3, 4]
+            }
+        }
+        
         try:
             with open(mission_plan_path, 'r') as f:
                 self.mission_plan = json.load(f)
         except Exception as e:
             print(f"[FastGymEnv] ERROR: Failed to load mission plan '{mission_plan_path}'. {e}")
-            # Fallback to an empty, but safe, plan
-            self.mission_plan = {
-                'reward_function': {}, 
-                'pruned_action_space': {
-                    'BLOCK_SIZE_M': [64], 'BLOCK_SIZE_N': [64], 'BLOCK_SIZE_K': [32],
-                    'num_warps': [4], 'num_stages': [4]
-                }
-            }
+            # Fallback to a safe plan with multiple options
+            self.mission_plan = DEFAULT_FALLBACK_PLAN
 
         self.reward_weights = self.mission_plan['reward_function']
         self.pruned_space = self.mission_plan['pruned_action_space']
@@ -60,7 +71,26 @@ class FastGymEnv(gym.Env):
             len(self.pruned_space['num_warps']),
             len(self.pruned_space['num_stages']),
         ])
-        print(f"[FastGymEnv] Mission Plan set. Action space has {self.action_space.nvec.prod()} combinations.")
+        
+        total_combinations = self.action_space.nvec.prod()
+        print(f"[FastGymEnv] Mission Plan set. Action space has {total_combinations} combinations.")
+        
+        # Validate action space has at least 2 combinations for PPO exploration
+        if total_combinations < 2:
+            print(f"[FastGymEnv] WARNING: Action space too small ({total_combinations}), using default with multiple options")
+            self.mission_plan = DEFAULT_FALLBACK_PLAN
+            self.reward_weights = self.mission_plan['reward_function']
+            self.pruned_space = self.mission_plan['pruned_action_space']
+            self.param_keys = list(self.pruned_space.keys())
+            self.action_space = spaces.MultiDiscrete([
+                len(self.pruned_space['BLOCK_SIZE_M']),
+                len(self.pruned_space['BLOCK_SIZE_N']),
+                len(self.pruned_space['BLOCK_SIZE_K']),
+                len(self.pruned_space['num_warps']),
+                len(self.pruned_space['num_stages']),
+            ])
+            total_combinations = self.action_space.nvec.prod()
+            print(f"[FastGymEnv] Updated action space to {total_combinations} combinations.")
 
     def _action_to_params(self, action):
         """Converts an action (indices) into a kernel config dict."""
