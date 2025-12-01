@@ -82,6 +82,45 @@ class TrainingCallback(BaseCallback):
             print(f"[TrainingCallback] Training ended after {self._step_count} steps")
 
 
+class EarlyStoppingCallback(BaseCallback):
+    """Stop training when reward stops improving."""
+    
+    def __init__(self, patience: int = 5, min_delta: float = 0.01, verbose: int = 1):
+        """
+        Initialize early stopping callback.
+        
+        Args:
+            patience: Number of steps without improvement before stopping
+            min_delta: Minimum improvement required to reset patience counter
+            verbose: Verbosity level (0 = silent, 1 = info)
+        """
+        super().__init__(verbose)
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_reward = float('-inf')
+        self.no_improvement_count = 0
+    
+    def _on_step(self) -> bool:
+        """
+        Called after each environment step.
+        
+        Returns:
+            True to continue training, False to stop early
+        """
+        if len(self.locals.get('infos', [])) > 0:
+            reward = self.locals['infos'][0].get('reward', 0)
+            if reward > self.best_reward + self.min_delta:
+                self.best_reward = reward
+                self.no_improvement_count = 0
+            else:
+                self.no_improvement_count += 1
+            if self.no_improvement_count >= self.patience:
+                if self.verbose > 0:
+                    print(f"[EarlyStopping] Stopping after {self.patience} steps without improvement")
+                return False
+        return True
+
+
 class ExplorationAgent:
     """
     Exploration Agent for kernel configuration optimization.
@@ -101,7 +140,7 @@ class ExplorationAgent:
         which takes ~30 seconds. Default n_steps=2048 would cause 17+ hour waits!
     """
     def __init__(self, env, log_dir="./logs/exploration_agent/", device=None,
-                 training_logger=None):
+                 training_logger=None, load_existing: bool = True):
         """
         Initialize the exploration agent.
         
@@ -110,9 +149,11 @@ class ExplorationAgent:
             log_dir: Directory for logs and model checkpoints
             device: Device for training ('cpu', 'cuda', or None for auto-detect)
             training_logger: Optional TrainingLogger for structured metrics logging
+            load_existing: If True, load existing model if available
         """
         self.log_dir = log_dir
         self.model_path = os.path.join(self.log_dir, "exploration_ppo_model.zip")
+        self.best_model_path = os.path.join(self.log_dir, "exploration_ppo_best.zip")
         os.makedirs(self.log_dir, exist_ok=True)
         
         # Store training logger for callback integration
@@ -125,6 +166,38 @@ class ExplorationAgent:
         # If device is explicitly passed, use that; otherwise auto-detect
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = device
+        self.best_reward = float('-inf')
+        
+        # TRY TO LOAD EXISTING MODEL
+        if load_existing and os.path.exists(self.model_path):
+            print(f"[ExplorationAgent] Loading existing model from {self.model_path}")
+            try:
+                self.model = PPO.load(
+                    self.model_path,
+                    env=self.env,
+                    device=device,
+                    tensorboard_log=self.log_dir,
+                )
+                print(f"[ExplorationAgent] Model loaded successfully!")
+                self._load_best_reward()
+            except Exception as e:
+                print(f"[ExplorationAgent] Failed to load: {e}, creating new")
+                self._create_new_model(device)
+        else:
+            print(f"[ExplorationAgent] Creating new PPO agent")
+            self._create_new_model(device)
+        
+        # Training history for analysis
+        self.training_history = []
+    
+    def _create_new_model(self, device: str) -> None:
+        """
+        Create a new PPO model.
+        
+        Args:
+            device: Device for training ('cpu' or 'cuda')
+        """
         print(f"[ExplorationAgent] Initializing PPO agent on device: {device}")
         
         # CRITICAL: Use small n_steps for NCU-based environments
@@ -146,9 +219,76 @@ class ExplorationAgent:
             clip_range=0.2,
             ent_coef=0.01,    # Small entropy bonus for exploration
         )
+    
+    def _load_best_reward(self) -> None:
+        """Load best reward from file."""
+        path = os.path.join(self.log_dir, "best_reward.txt")
+        if os.path.exists(path):
+            with open(path, 'r') as f:
+                self.best_reward = float(f.read().strip())
+            print(f"[ExplorationAgent] Best reward: {self.best_reward:.2f}")
+    
+    def save_best_if_improved(self, current_reward: float) -> bool:
+        """
+        Save model if current reward is best.
         
-        # Training history for analysis
-        self.training_history = []
+        Args:
+            current_reward: The current reward value to compare
+            
+        Returns:
+            True if this was a new best reward and model was saved, False otherwise
+        """
+        if current_reward > self.best_reward:
+            self.best_reward = current_reward
+            self.model.save(self.best_model_path)
+            with open(os.path.join(self.log_dir, "best_reward.txt"), 'w') as f:
+                f.write(str(self.best_reward))
+            print(f"[ExplorationAgent] New best! Reward: {self.best_reward:.2f}")
+            return True
+        return False
+    
+    def load_best(self) -> bool:
+        """
+        Load best saved model.
+        
+        Returns:
+            True if best model was loaded successfully, False otherwise
+        """
+        if os.path.exists(self.best_model_path):
+            self.model = PPO.load(self.best_model_path, env=self.env, device=self.device)
+            return True
+        return False
+    
+    @classmethod
+    def load_for_inference(cls, model_path: str, env, device: Optional[str] = None):
+        """
+        Load trained model for inference.
+        
+        Args:
+            model_path: Path to the saved model file
+            env: Environment to use with the model
+            device: Device to load model on (auto-detect if None)
+            
+        Returns:
+            Loaded PPO model ready for inference
+        """
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        return PPO.load(model_path, env=env, device=device)
+    
+    def predict(self, observation, deterministic: bool = True):
+        """
+        Use trained model to predict action.
+        
+        Args:
+            observation: Current environment observation
+            deterministic: If True, use deterministic actions (no exploration)
+            
+        Returns:
+            Tuple of (action, info_dict) where info_dict contains metadata
+        """
+        action, _states = self.model.predict(observation, deterministic=deterministic)
+        return action, {"deterministic": deterministic}
 
     def train_epoch(self, steps=100, callback=None):
         """
