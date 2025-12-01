@@ -206,9 +206,9 @@ class HAKT_Reward_Function:
                 json_str = param_start_match.group(1).strip()
                 print("[RewardFn] Found truncated content after <param> tag, attempting recovery.")
                 # Try to fix truncated JSON
-                fixed = self._fix_truncated_json(json_str)
-                if fixed is not None:
-                    return fixed
+                recovered_json = self._fix_truncated_json(json_str)
+                if recovered_json is not None:
+                    return recovered_json
             
             # Fallback to brace matching
             match = re.search(r'(\{.*\})', llm_output_str, re.DOTALL)
@@ -218,9 +218,9 @@ class HAKT_Reward_Function:
                 if match_partial:
                     json_str = match_partial.group(1).strip()
                     print("[RewardFn] Found partial JSON, attempting recovery.")
-                    fixed = self._fix_truncated_json(json_str)
-                    if fixed is not None:
-                        return fixed
+                    recovered_json = self._fix_truncated_json(json_str)
+                    if recovered_json is not None:
+                        return recovered_json
                 
                 salvage = self._try_salvage_plan(llm_output_str)
                 if salvage is not None:
@@ -492,7 +492,8 @@ class HAKT_Reward_Function:
             # Periodic validation
             if (i + 1) % VALIDATE_EVERY_N_TOKENS == 0 and best_configs_for_validation:
                 print(f"[RewardFn] Running periodic vLLM validation after {i+1} token counts...")
-                best_config = max(best_configs_for_validation, key=lambda x: x[2])
+                # best_configs_for_validation contains tuples of (params, state, reward)
+                best_config = max(best_configs_for_validation, key=lambda x: x[2])  # x[2] is reward
                 throughput = self._run_slow_gym([best_config])
                 print(f"[RewardFn] Periodic validation throughput: {throughput} tokens/sec")
                 best_configs_for_validation = []
