@@ -603,7 +603,8 @@ class MetaControllerReward:
         # Ensure each dimension has at least 2 values
         for key in ["BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "num_warps", "num_stages"]:
             if len(ss[key]) < MIN_VALUES_PER_DIM:
-                # Merge with defaults, remove duplicates
+                # Merge with defaults, remove duplicates, limit to 3 values
+                # (consistent with _coerce_list which limits to 3 to keep search space manageable)
                 ss[key] = list(set(ss[key] + defaults[key]))[:3]
                 print(f"[MetaController] Expanded {key} to {ss[key]} (was too narrow)")
         

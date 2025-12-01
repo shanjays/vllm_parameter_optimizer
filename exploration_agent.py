@@ -182,10 +182,13 @@ class ExplorationAgent:
                 # Get action space dimensions
                 current_action_space = self.env.action_space
                 
-                # Check if they're compatible
+                # Check if they're compatible using structural comparison
                 if hasattr(loaded_model, 'action_space'):
                     saved_action_space = loaded_model.action_space
-                    if str(saved_action_space) != str(current_action_space):
+                    spaces_compatible = self._check_action_space_compatibility(
+                        saved_action_space, current_action_space
+                    )
+                    if not spaces_compatible:
                         print(f"[ExplorationAgent] Action space changed: {saved_action_space} -> {current_action_space}")
                         print(f"[ExplorationAgent] Creating new model (can't reuse old weights)")
                         self._create_new_model(device)
@@ -220,6 +223,42 @@ class ExplorationAgent:
         # Training history for analysis
         self.training_history = []
     
+    def _check_action_space_compatibility(self, saved_space, current_space) -> bool:
+        """
+        Check if two action spaces are compatible for model loading.
+        
+        Compares the type and structure of the spaces to determine if a saved
+        model can be loaded with the current environment's action space.
+        
+        Args:
+            saved_space: Action space from the saved model
+            current_space: Action space from the current environment
+            
+        Returns:
+            True if the spaces are compatible, False otherwise
+        """
+        # Check if types match
+        if type(saved_space) != type(current_space):
+            return False
+        
+        # For Box spaces (continuous), check shape and bounds
+        if hasattr(saved_space, 'shape') and hasattr(current_space, 'shape'):
+            if saved_space.shape != current_space.shape:
+                return False
+        
+        # For Discrete spaces, check n (number of actions)
+        if hasattr(saved_space, 'n') and hasattr(current_space, 'n'):
+            if saved_space.n != current_space.n:
+                return False
+        
+        # For MultiDiscrete spaces, check nvec
+        if hasattr(saved_space, 'nvec') and hasattr(current_space, 'nvec'):
+            import numpy as np
+            if not np.array_equal(saved_space.nvec, current_space.nvec):
+                return False
+        
+        return True
+
     def _create_new_model(self, device: str) -> None:
         """
         Create a new PPO model.

@@ -133,7 +133,8 @@ def _validate_and_coerce_plan(plan):
     # Ensure each dimension has at least 2 values
     for key in ["BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "num_warps", "num_stages"]:
         if len(pas[key]) < MIN_VALUES_PER_DIM:
-            # Merge with defaults, remove duplicates
+            # Merge with defaults, remove duplicates, limit to 3 values
+            # (consistent with _coerce_list which limits to 3 to keep search space manageable)
             pas[key] = list(set(pas[key] + defaults[key]))[:3]
             print(f"[RewardFn] Expanded {key} to {pas[key]} (was too narrow)")
     
