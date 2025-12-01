@@ -198,7 +198,7 @@ def test_backward_compatibility_init_signature():
     
     # Original required parameters: user_goal, model_name, exploration_steps, profiling_gpu_id, static_args
     required_params = ['user_goal', 'model_name', 'exploration_steps', 'profiling_gpu_id', 'static_args']
-    optional_params = ['config_exporter', 'token_counts', 'training_logger']
+    optional_params = ['config_exporter', 'token_counts', 'training_logger', 'feedback_collector']
     
     all_found = True
     
@@ -220,6 +220,97 @@ def test_backward_compatibility_init_signature():
     return False
 
 
+def test_feedback_collector_parameter_in_init():
+    """Test that __init__ signature includes feedback_collector parameter."""
+    print("\n=== Test: feedback_collector parameter in __init__ ===")
+    
+    source = get_meta_controller_source()
+    
+    # Find the __init__ method signature
+    # Looking for: def __init__(self, ..., feedback_collector=None):
+    init_pattern = r'def __init__\s*\([^)]*feedback_collector[^)]*\)'
+    match = re.search(init_pattern, source)
+    
+    if match:
+        print(f"✅ Found feedback_collector parameter in __init__ signature")
+        return True
+    else:
+        print(f"❌ feedback_collector parameter NOT found in __init__ signature")
+        return False
+
+
+def test_feedback_collector_defaults_none():
+    """Test that feedback_collector defaults to None."""
+    print("\n=== Test: feedback_collector defaults to None ===")
+    
+    source = get_meta_controller_source()
+    
+    # Check for feedback_collector=None in __init__ signature
+    pattern = r'feedback_collector\s*=\s*None'
+    match = re.search(pattern, source)
+    
+    if match:
+        print(f"✅ feedback_collector defaults to None")
+        return True
+    else:
+        print(f"❌ feedback_collector does NOT default to None")
+        return False
+
+
+def test_feedback_collector_stored_in_init():
+    """Test that feedback_collector is stored as self.feedback_collector in __init__."""
+    print("\n=== Test: feedback_collector stored as instance attribute ===")
+    
+    source = get_meta_controller_source()
+    
+    # Check for self.feedback_collector = feedback_collector in __init__
+    pattern = r'self\.feedback_collector\s*=\s*feedback_collector'
+    match = re.search(pattern, source)
+    
+    if match:
+        print(f"✅ feedback_collector is stored as self.feedback_collector")
+        return True
+    else:
+        print(f"❌ feedback_collector is NOT stored as self.feedback_collector")
+        return False
+
+
+def test_feedback_collector_record_policy_result():
+    """Test that feedback_collector.record_policy_result is called."""
+    print("\n=== Test: feedback_collector.record_policy_result is called ===")
+    
+    source = get_meta_controller_source()
+    
+    # Check for self.feedback_collector.record_policy_result call
+    pattern = r'self\.feedback_collector\.record_policy_result\s*\('
+    match = re.search(pattern, source)
+    
+    if match:
+        print(f"✅ feedback_collector.record_policy_result is called")
+        return True
+    else:
+        print(f"❌ feedback_collector.record_policy_result is NOT called")
+        return False
+
+
+def test_exploration_phase_returns_best_configs():
+    """Test that _run_exploration_phase returns best_configs."""
+    print("\n=== Test: _run_exploration_phase returns best_configs ===")
+    
+    source = get_meta_controller_source()
+    
+    # Check for return statement with best_configs (flexible pattern for any slice)
+    pattern = r'return\s+sorted_results\[[^\]]+\]\s*,\s*best_configs'
+    match = re.search(pattern, source)
+    
+    if match:
+        print(f"✅ _run_exploration_phase returns best_configs")
+        return True
+    else:
+        print(f"❌ _run_exploration_phase does NOT return best_configs")
+        return False
+
+
 if __name__ == "__main__":
     print("--- META CONTROLLER LOAD EXISTING TESTS ---")
     
@@ -235,6 +326,13 @@ if __name__ == "__main__":
     all_passed &= test_best_configs_tracked()
     all_passed &= test_config_exporter_updated()
     all_passed &= test_backward_compatibility_init_signature()
+    
+    # New tests for feedback_collector
+    all_passed &= test_feedback_collector_parameter_in_init()
+    all_passed &= test_feedback_collector_defaults_none()
+    all_passed &= test_feedback_collector_stored_in_init()
+    all_passed &= test_feedback_collector_record_policy_result()
+    all_passed &= test_exploration_phase_returns_best_configs()
     
     print("\n" + "="*60)
     if all_passed:

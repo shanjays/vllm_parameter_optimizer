@@ -24,6 +24,7 @@ from trl import GRPOTrainer, GRPOConfig
 
 from meta_controller import MetaControllerReward
 from config_exporter import VLLMConfigExporter, TOKEN_COUNTS_ALL
+from feedback_collector import FeedbackCollector
 
 META_CONTROLLER_GPU_ID = 0
 PROFILING_GPU_ID = 7
@@ -119,6 +120,88 @@ def get_initial_profile_data():
     print(f"[HierarchicalOptimizer] Initial profile '{ncu_log_file}' created successfully.")
     return csv_data
 
+
+def build_optimization_prompt(initial_ncu_report, feedback_collector=None):
+    """
+    Build the optimization prompt with optional feedback from previous iterations.
+    
+    Args:
+        initial_ncu_report: Initial NCU profiling data
+        feedback_collector: Optional FeedbackCollector for contextual feedback
+        
+    Returns:
+        str: The formatted optimization prompt
+    """
+    # Format token counts for the prompt
+    token_counts_str = ", ".join(str(tc) for tc in TOKEN_COUNTS_TO_TEST)
+    
+    # Get feedback from previous iterations if available
+    feedback_section = ""
+    if feedback_collector:
+        feedback_section = feedback_collector.format_feedback_for_prompt()
+    
+    optimization_prompt = f"""You are an AGGRESSIVE CUDA kernel optimization expert. Your goal is to find the FASTEST possible fused_moe kernel configurations for maximum throughput.
+
+=== TARGET MODEL ===
+{MODEL_NAME}
+Experts: {STATIC_BENCHMARK_ARGS['num_experts']}, Intermediate Size: {STATIC_BENCHMARK_ARGS['inter_size']}, Top-K: {STATIC_BENCHMARK_ARGS['top_k']}
+
+=== HARDWARE ===
+NVIDIA H100 80GB HBM3
+Shared Memory: 227KB per SM (232,448 bytes)
+Target: Push configs to the EDGE of hardware limits!
+
+=== TOKEN COUNTS TO OPTIMIZE ===
+You are optimizing for these specific token batch sizes:
+{token_counts_str}
+
+Each token count needs different optimal parameters:
+- Small batches (1-16): May prefer smaller blocks, fewer stages
+- Medium batches (64-512): Balance between parallelism and efficiency  
+- Large batches (1024+): Maximize throughput with larger blocks
+
+=== INITIAL PROFILING METRICS ===
+{initial_ncu_report}
+
+{feedback_section}=== OPTIMIZATION POLICY FORMAT ===
+Output your policy inside <param></param> tags as JSON:
+
+<param>
+{{
+  "objective_weights": {{
+    "R_sm_throughput": <0.0-1.0>,
+    "R_dram_throughput": <0.0-1.0>,
+    "R_l1_hit_rate": <0.0-1.0>,
+    "R_l2_hit_rate": <0.0-1.0>
+  }},
+  "search_space": {{
+    "BLOCK_SIZE_M": [<values from 16,32,64,128>],
+    "BLOCK_SIZE_N": [<values from 32,64,128>],
+    "BLOCK_SIZE_K": [<values from 32,64>],
+    "num_warps": [<values from 4,8,16>],
+    "num_stages": [<values from 2,3,4,5>]
+  }}
+}}
+</param>
+
+=== 🔥 BE AGGRESSIVE! 🔥 ===
+- Configs that occasionally hit VRAM limits are GOOD - they show we're pushing boundaries!
+- LARGER block sizes generally = BETTER throughput
+- MORE pipeline stages = BETTER memory hiding (up to VRAM limits)
+- num_stages=5 is allowed for aggressive testing!
+- If configs never fail, you're being TOO CONSERVATIVE!
+- Target: 90%+ GPU memory utilization
+
+=== STRATEGY ===
+1. Prioritize SM throughput (weight 0.4-0.5) - this is compute bound
+2. Secondary: DRAM throughput (weight 0.3-0.4) - memory bandwidth matters
+3. Cache hit rates are less critical for MoE (weight 0.1-0.15 each)
+
+Output ONLY the <param>JSON</param> block. Keep reasoning minimal.
+"""
+    return optimization_prompt
+
+
 def main():
     """Main entry point for the hierarchical kernel optimizer."""
     _check_versions_and_env()
@@ -164,70 +247,12 @@ def main():
         task_type="CAUSAL_LM",
     )
 
-    # Format token counts for the prompt
-    token_counts_str = ", ".join(str(tc) for tc in TOKEN_COUNTS_TO_TEST)
+    # Initialize feedback collector for contextual learning
+    print("[HierarchicalOptimizer] Initializing Feedback Collector for contextual learning...")
+    feedback_collector = FeedbackCollector(state_file="./feedback_state.json")
     
-    optimization_prompt = f"""You are an AGGRESSIVE CUDA kernel optimization expert. Your goal is to find the FASTEST possible fused_moe kernel configurations for maximum throughput.
-
-=== TARGET MODEL ===
-{MODEL_NAME}
-Experts: {STATIC_BENCHMARK_ARGS['num_experts']}, Intermediate Size: {STATIC_BENCHMARK_ARGS['inter_size']}, Top-K: {STATIC_BENCHMARK_ARGS['top_k']}
-
-=== HARDWARE ===
-NVIDIA H100 80GB HBM3
-Shared Memory: 227KB per SM (232,448 bytes)
-Target: Push configs to the EDGE of hardware limits!
-
-=== TOKEN COUNTS TO OPTIMIZE ===
-You are optimizing for these specific token batch sizes:
-{token_counts_str}
-
-Each token count needs different optimal parameters:
-- Small batches (1-16): May prefer smaller blocks, fewer stages
-- Medium batches (64-512): Balance between parallelism and efficiency  
-- Large batches (1024+): Maximize throughput with larger blocks
-
-=== INITIAL PROFILING METRICS ===
-{initial_ncu_report}
-
-=== OPTIMIZATION POLICY FORMAT ===
-Output your policy inside <param></param> tags as JSON:
-
-<param>
-{{
-  "objective_weights": {{
-    "R_sm_throughput": <0.0-1.0>,
-    "R_dram_throughput": <0.0-1.0>,
-    "R_l1_hit_rate": <0.0-1.0>,
-    "R_l2_hit_rate": <0.0-1.0>
-  }},
-  "search_space": {{
-    "BLOCK_SIZE_M": [<values from 16,32,64,128>],
-    "BLOCK_SIZE_N": [<values from 32,64,128>],
-    "BLOCK_SIZE_K": [<values from 32,64>],
-    "num_warps": [<values from 4,8,16>],
-    "num_stages": [<values from 2,3,4,5>]
-  }}
-}}
-</param>
-
-=== 🔥 BE AGGRESSIVE! 🔥 ===
-- Configs that occasionally hit VRAM limits are GOOD - they show we're pushing boundaries!
-- LARGER block sizes generally = BETTER throughput
-- MORE pipeline stages = BETTER memory hiding (up to VRAM limits)
-- num_stages=5 is allowed for aggressive testing!
-- If configs never fail, you're being TOO CONSERVATIVE!
-- Target: 90%+ GPU memory utilization
-
-=== STRATEGY ===
-1. Prioritize SM throughput (weight 0.4-0.5) - this is compute bound
-2. Secondary: DRAM throughput (weight 0.3-0.4) - memory bandwidth matters
-3. Cache hit rates are less critical for MoE (weight 0.1-0.15 each)
-
-Output ONLY the <param>JSON</param> block. Keep reasoning minimal.
-"""
-
-    dataset = Dataset.from_list([{"prompt": optimization_prompt}] * META_LEARNING_STEPS)
+    # Build initial prompt (will be regenerated with feedback each step)
+    optimization_prompt = build_optimization_prompt(initial_ncu_report, feedback_collector)
 
     # Create config exporter for vLLM format
     config_exporter = VLLMConfigExporter(
@@ -244,7 +269,8 @@ Output ONLY the <param>JSON</param> block. Keep reasoning minimal.
         profiling_gpu_id=PROFILING_GPU_ID,
         static_args=STATIC_BENCHMARK_ARGS,
         config_exporter=config_exporter,
-        token_counts=TOKEN_COUNTS_TO_TEST
+        token_counts=TOKEN_COUNTS_TO_TEST,
+        feedback_collector=feedback_collector
     )
 
     def meta_controller_reward_wrapper(completions, **kwargs):
@@ -268,6 +294,11 @@ Output ONLY the <param>JSON</param> block. Keep reasoning minimal.
         num_generations=NUM_GENERATIONS,               # Use the configured value
         loss_type="grpo",
     )
+
+    # Create dataset with prompts that include contextual feedback
+    # Note: HuggingFace Dataset uses static snapshots, but feedback will be recorded
+    # after each policy evaluation and persisted for use in subsequent training runs
+    dataset = Dataset.from_list([{"prompt": build_optimization_prompt(initial_ncu_report, feedback_collector)}] * META_LEARNING_STEPS)
 
     trainer = GRPOTrainer(
         model=meta_controller_llm,
@@ -294,6 +325,10 @@ Output ONLY the <param>JSON</param> block. Keep reasoning minimal.
     # Print summary
     summary = config_exporter.get_summary()
     print(f"[HierarchicalOptimizer] Config Summary: {summary}")
+    
+    # Print feedback collector summary
+    feedback_summary = feedback_collector.get_summary()
+    print(f"[HierarchicalOptimizer] Feedback Summary: {feedback_summary}")
 
     final_model_path = "hierarchical_optimizer_final"
     trainer.model.save_pretrained(final_model_path)
