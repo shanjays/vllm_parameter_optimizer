@@ -268,7 +268,7 @@ Analyze the NCU metrics and generate an optimized mission plan for the {KERNEL_T
         report_to="tensorboard",
         remove_unused_columns=False,
         temperature=0.7,
-        max_prompt_length=4096,  # Increased from 2048 to 4096 for longer prompts
+        max_prompt_length=3900,  # Increased from 2048, with buffer for special tokens
         max_completion_length=4096,  # Increased from 2048 to 4096 for longer reasoning
         num_generations=8,  # Increased from 4 to 8 for better GRPO exploration
         loss_type="grpo",
