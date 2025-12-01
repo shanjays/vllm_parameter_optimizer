@@ -57,14 +57,15 @@ VLLM_GPU_MEMORY_UTIL = 0.90       # Aggressive (was 0.85)
 
 STATIC_BENCHMARK_ARGS = {
     "run_script_path": RUN_SCRIPT_PATH,
-    "kernel_name": KERNEL_TO_TUNE,
-    "num_tokens": 16088,
-    "num_experts": 128,
-    "top_k": 2,
-    "hidden_size": 6144,
-    "inter_size": 1536,
-    "dtype": "fp16",
-    "num_iters": 1
+    "kernel_name": "fused_moe_kernel",
+    "num_tokens": 4096,       # Will be varied during training
+    "num_experts": 128,       # E=128 ✅
+    "top_k": 8,               # 8 experts ✅ (was 2)
+    "hidden_size": 6656,      # ✅ (was 6144)
+    "inter_size": 768,        # N=768 ✅ (was 1536)
+    "dtype": "bfloat16",      # bf16 for H100
+    "num_iters": 3,
+    "num_warmup_iters": 1,
 }
 
 # Aggressive search space for H100 - includes num_stages=5 for aggressive testing
@@ -304,6 +305,7 @@ Output ONLY the <param>JSON</param> block. Keep reasoning minimal.
 
 if __name__ == "__main__":
     main()
+
 
 
 
