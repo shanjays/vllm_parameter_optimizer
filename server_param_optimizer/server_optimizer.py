@@ -77,6 +77,9 @@ BENCHMARK_DURATION_MINUTES = 20
 NUM_ITERATIONS = 8
 OUTPUT_DIR = "./server_optimization_results"
 
+# Logging separator width for consistent terminal output
+SEPARATOR_WIDTH = 70
+
 # GPU assignment (for multi-GPU systems)
 LLM_GPU_ID = 0        # GPU for LLM meta-controller
 BENCHMARK_GPU_ID = 1  # GPU for vLLM benchmarks
@@ -322,12 +325,12 @@ class ServerParameterOptimizer:
     
     def _print_header(self) -> None:
         """Print optimization header."""
-        print("\n" + "═" * 70)
+        print("\n" + "═" * SEPARATOR_WIDTH)
         print(f"Server Parameter Optimization for {self.model_name}")
         print(f"GPU: {self.gpu_type}")
         print(f"LLM GPU: {self.llm_gpu_id} | Benchmark GPU: {self.benchmark_gpu_id}")
         print(f"Benchmark Duration: {self.benchmark_duration_minutes} minutes per config")
-        print("═" * 70 + "\n")
+        print("═" * SEPARATOR_WIDTH + "\n")
     
     def run_optimization(self, num_iterations: Optional[int] = None) -> None:
         """Run the full optimization loop.
@@ -357,9 +360,9 @@ class ServerParameterOptimizer:
         """
         self.current_iteration = iteration_num
         
-        print("\n" + "═" * 70)
+        print("\n" + "═" * SEPARATOR_WIDTH)
         print(f"[ServerOptimizer] ITERATION {iteration_num}/{self.num_iterations}")
-        print("═" * 70)
+        print("═" * SEPARATOR_WIDTH)
         
         # Generate configurations using LLM
         print("\n[ServerOptimizer] LLM generating configurations...")
@@ -367,16 +370,16 @@ class ServerParameterOptimizer:
         print(f"[ServerOptimizer] LLM suggested {len(configs)} configurations")
         
         # Print parameter configs being tested
-        print("\n" + "-" * 70)
+        print("\n" + "-" * SEPARATOR_WIDTH)
         print("[ServerOptimizer] PARAMETER CONFIGS TO BE TESTED THIS ITERATION:")
-        print("-" * 70)
+        print("-" * SEPARATOR_WIDTH)
         for i, config in enumerate(configs, 1):
             print(f"\n  Config {i}: {config.get('name', 'unnamed')}")
             print(f"    max_num_seqs: {config.get('max_num_seqs')}")
             print(f"    max_num_batched_tokens: {config.get('max_num_batched_tokens')}")
             if config.get('rationale'):
                 print(f"    rationale: {config.get('rationale')}")
-        print("-" * 70 + "\n")
+        print("-" * SEPARATOR_WIDTH + "\n")
         
         # Benchmark each configuration
         iteration_configs = []
@@ -401,11 +404,11 @@ class ServerParameterOptimizer:
         self.feedback_collector.add_iteration(iteration_configs, iteration_results)
         
         # Print iteration summary with detailed feedback
-        print("\n" + "=" * 70)
+        print("\n" + "=" * SEPARATOR_WIDTH)
         print(f"[ServerOptimizer] ITERATION {iteration_num} COMPLETE - FEEDBACK SUMMARY:")
-        print("=" * 70)
+        print("=" * SEPARATOR_WIDTH)
         self._print_iteration_feedback(iteration_configs, iteration_results)
-        print("=" * 70 + "\n")
+        print("=" * SEPARATOR_WIDTH + "\n")
     
     def _benchmark_config(self, config: Dict[str, Any]) -> BenchmarkResult:
         """Run benchmark for a single configuration.
@@ -695,9 +698,9 @@ class ServerParameterOptimizer:
         """Print comprehensive final summary."""
         duration = time.time() - self.start_time if self.start_time else 0
         
-        print("\n" + "═" * 70)
+        print("\n" + "═" * SEPARATOR_WIDTH)
         print("OPTIMIZATION COMPLETE - FINAL SUMMARY")
-        print("═" * 70)
+        print("═" * SEPARATOR_WIDTH)
         
         print(f"\nModel: {self.model_name}")
         print(f"GPU: {self.gpu_type}")
@@ -738,7 +741,7 @@ class ServerParameterOptimizer:
         print(f"📈 Full results saved to: {self.output_dir}/optimization_results.json")
         print(f"🚀 Launch scripts saved to: {self.output_dir}/launch_scripts/")
         
-        print("═" * 70 + "\n")
+        print("═" * SEPARATOR_WIDTH + "\n")
 
 
 def main():
@@ -759,9 +762,9 @@ def main():
     
     args = parser.parse_args()
     
-    print("\n" + "═" * 70)
+    print("\n" + "═" * SEPARATOR_WIDTH)
     print("          SERVER PARAMETER OPTIMIZER FOR VLLM")
-    print("═" * 70)
+    print("═" * SEPARATOR_WIDTH)
     
     optimizer = ServerParameterOptimizer(
         model_name=MODEL_NAME,

@@ -35,6 +35,9 @@ META_CONTROLLER_MODEL = "openai/gpt-oss-20b"
 MAX_SEQ_LENGTH = 8192
 MAX_COMPLETION_LENGTH = 4096
 
+# Logging separator width for consistent terminal output
+SEPARATOR_WIDTH = 70
+
 # H100 80GB thermal configuration
 GPU_CONFIG = {
     'name': 'NVIDIA H100 80GB',
@@ -174,11 +177,11 @@ class ServerMetaController:
             feedback_str = "No previous results. This is the first iteration."
         
         # Print the feedback being used for LLM generation
-        print("\n" + "=" * 70)
+        print("\n" + "=" * SEPARATOR_WIDTH)
         print("[ServerMetaController] FEEDBACK FOR LLM PROMPT:")
-        print("=" * 70)
+        print("=" * SEPARATOR_WIDTH)
         print(feedback_str)
-        print("=" * 70 + "\n")
+        print("=" * SEPARATOR_WIDTH + "\n")
         
         # Build the prompt
         prompt = self._build_prompt(feedback_str)
@@ -203,16 +206,16 @@ class ServerMetaController:
             validated_configs = self._generate_default_configs()
         
         # Print the validated configurations that will be tested
-        print("\n" + "=" * 70)
+        print("\n" + "=" * SEPARATOR_WIDTH)
         print("[ServerMetaController] VALIDATED CONFIGURATIONS TO TEST:")
-        print("=" * 70)
+        print("=" * SEPARATOR_WIDTH)
         for i, config in enumerate(validated_configs, 1):
             print(f"\nConfig {i}: {config.get('name', 'unnamed')}")
             print(f"  max_num_seqs: {config.get('max_num_seqs')}")
             print(f"  max_num_batched_tokens: {config.get('max_num_batched_tokens')}")
             if config.get('rationale'):
                 print(f"  rationale: {config.get('rationale')}")
-        print("=" * 70 + "\n")
+        print("=" * SEPARATOR_WIDTH + "\n")
         
         print(f"[ServerMetaController] Generated {len(validated_configs)} valid configurations")
         return validated_configs
@@ -336,11 +339,11 @@ NOW GENERATE YOUR CONFIGURATIONS:
                 llm_output = generated_text
             
             # Print full LLM raw response before parsing (without truncation)
-            print("\n" + "=" * 70)
+            print("\n" + "=" * SEPARATOR_WIDTH)
             print("[ServerMetaController] FULL LLM RAW RESPONSE (before parsing):")
-            print("=" * 70)
+            print("=" * SEPARATOR_WIDTH)
             print(llm_output)
-            print("=" * 70 + "\n")
+            print("=" * SEPARATOR_WIDTH + "\n")
             
             # Parse configs from output
             configs = self._parse_configs(llm_output)

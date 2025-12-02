@@ -2205,7 +2205,8 @@ def test_server_meta_controller_generate_configs_logging():
     controller = ServerMetaController()
     
     # Create a mock feedback collector with some data
-    temp_file = os.path.join(tempfile.mkdtemp(), "test_state.json")
+    temp_dir = tempfile.mkdtemp()
+    temp_file = os.path.join(temp_dir, "test_state.json")
     try:
         collector = ServerFeedbackCollector(state_file=temp_file)
         
@@ -2239,9 +2240,7 @@ def test_server_meta_controller_generate_configs_logging():
         
         print("✅ test_server_meta_controller_generate_configs_logging PASSED")
     finally:
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
-        shutil.rmtree(os.path.dirname(temp_file))
+        shutil.rmtree(temp_dir)
 
 
 def test_server_meta_controller_default_configs_logging():
