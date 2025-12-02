@@ -15,6 +15,11 @@ from .server_profiling_worker import (
     ServerProfilingWorker,
     ServerProfilingWorkerLocal,
     BenchmarkResult,
+    BenchmarkErrorType,
+    classify_error,
+    get_error_penalty,
+    log_error_details,
+    is_benchmark_successful,
     RAY_AVAILABLE
 )
 from .server_config_exporter import ServerConfigExporter, ServerConfig
@@ -39,6 +44,11 @@ __all__ = [
     'ServerProfilingWorker',
     'ServerProfilingWorkerLocal',
     'BenchmarkResult',
+    'BenchmarkErrorType',
+    'classify_error',
+    'get_error_penalty',
+    'log_error_details',
+    'is_benchmark_successful',
     'RAY_AVAILABLE',
     # Config exporter (PR 2)
     'ServerConfigExporter',

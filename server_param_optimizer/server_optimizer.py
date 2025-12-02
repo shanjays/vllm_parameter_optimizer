@@ -11,25 +11,63 @@ Benchmark Duration: 20 minutes per configuration
 
 import json
 import os
+import sys
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
-from .thermal_monitor import ThermalMonitor, ThermalConfig, ThermalSample
-from .visualization import ThermalVisualizer
-from .server_profiling_worker import (
-    ServerProfilingWorkerLocal,
-    BenchmarkResult,
-    RAY_AVAILABLE
-)
-from .server_config_exporter import ServerConfigExporter
-from .server_feedback_collector import ServerFeedbackCollector
-from .server_meta_controller import ServerMetaController, PARAM_SPACE
+# Add parent directory to path for script execution
+if __name__ == "__main__" or "." not in __name__:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Import with fallback for both module and script execution
+try:
+    from .thermal_monitor import ThermalMonitor, ThermalConfig, ThermalSample
+except ImportError:
+    from thermal_monitor import ThermalMonitor, ThermalConfig, ThermalSample
+
+try:
+    from .visualization import ThermalVisualizer
+except ImportError:
+    from visualization import ThermalVisualizer
+
+try:
+    from .server_profiling_worker import (
+        ServerProfilingWorkerLocal,
+        BenchmarkResult,
+        RAY_AVAILABLE,
+        log_error_details
+    )
+except ImportError:
+    from server_profiling_worker import (
+        ServerProfilingWorkerLocal,
+        BenchmarkResult,
+        RAY_AVAILABLE,
+        log_error_details
+    )
+
+try:
+    from .server_config_exporter import ServerConfigExporter
+except ImportError:
+    from server_config_exporter import ServerConfigExporter
+
+try:
+    from .server_feedback_collector import ServerFeedbackCollector
+except ImportError:
+    from server_feedback_collector import ServerFeedbackCollector
+
+try:
+    from .server_meta_controller import ServerMetaController, PARAM_SPACE
+except ImportError:
+    from server_meta_controller import ServerMetaController, PARAM_SPACE
 
 # Try to import Ray
 if RAY_AVAILABLE:
     import ray
-    from .server_profiling_worker import ServerProfilingWorker
+    try:
+        from .server_profiling_worker import ServerProfilingWorker
+    except ImportError:
+        from server_profiling_worker import ServerProfilingWorker
 
 
 # Default configuration
@@ -322,33 +360,35 @@ class ServerParameterOptimizer:
                 duration_minutes=self.benchmark_duration_minutes
             )
         
-        # Print results
+        # Print results with proper error handling
         if result.error:
-            print(f"[Benchmark] Error: {result.error}")
+            # Log detailed error info for debugging
+            log_error_details(result.error, result.config)
+            print(f"[ServerOptimizer] ❌ Benchmark FAILED - penalty: {result.penalty}")
         else:
             print(f"[Benchmark] Throughput: {result.throughput:.1f} tokens/sec")
-        
-        # Print thermal summary using helper function
-        if result.thermal_summary:
-            temp_min = _get_thermal_value(result.thermal_summary, 'temp_min')
-            temp_max = _get_thermal_value(result.thermal_summary, 'temp_max')
-            temp_avg = _get_thermal_value(result.thermal_summary, 'temp_avg')
-            print(f"[ThermalMonitor] Temp: min={temp_min:.0f}°C, max={temp_max:.0f}°C, avg={temp_avg:.1f}°C")
-        
-        # Save thermal plot
-        self._save_thermal_plot(config, result)
-        
-        # Print thermal status
-        if result.is_thermally_safe:
-            temp_max = _get_thermal_value(result.thermal_summary, 'temp_max')
-            print(f"[ServerOptimizer] ✓ Thermally safe (max {temp_max:.0f}°C < {self.thermal_config.target_sustained_temp}°C target)")
-            if self._is_new_best_sustained(result):
-                print("[ServerOptimizer] → New best SUSTAINED config!")
-        else:
-            print(f"[ServerOptimizer] ⚠️ Above thermal target")
-        
-        if self._is_new_best_aggressive(result):
-            print("[ServerOptimizer] → New best AGGRESSIVE config!")
+            
+            # Print thermal summary using helper function
+            if result.thermal_summary:
+                temp_min = _get_thermal_value(result.thermal_summary, 'temp_min')
+                temp_max = _get_thermal_value(result.thermal_summary, 'temp_max')
+                temp_avg = _get_thermal_value(result.thermal_summary, 'temp_avg')
+                print(f"[ThermalMonitor] Temp: min={temp_min:.0f}°C, max={temp_max:.0f}°C, avg={temp_avg:.1f}°C")
+            
+            # Save thermal plot (only for successful benchmarks)
+            self._save_thermal_plot(config, result)
+            
+            # Print thermal status - only check for "best" if successful
+            if result.is_thermally_safe:
+                temp_max = _get_thermal_value(result.thermal_summary, 'temp_max')
+                print(f"[ServerOptimizer] ✓ Thermally safe (max {temp_max:.0f}°C < {self.thermal_config.target_sustained_temp}°C target)")
+                if self._is_new_best_sustained(result):
+                    print("[ServerOptimizer] → New best SUSTAINED config!")
+            else:
+                print(f"[ServerOptimizer] ⚠️ Above thermal target")
+            
+            if self._is_new_best_aggressive(result):
+                print("[ServerOptimizer] → New best AGGRESSIVE config!")
         
         return result
     
@@ -420,6 +460,9 @@ class ServerParameterOptimizer:
         Returns:
             True if this is a new best aggressive config
         """
+        # Skip failed benchmarks
+        if not result.is_successful:
+            return False
         if self.config_exporter.best_aggressive is None:
             return True
         return result.throughput > self.config_exporter.best_aggressive.throughput
@@ -433,6 +476,9 @@ class ServerParameterOptimizer:
         Returns:
             True if this is a new best sustained config
         """
+        # Skip failed benchmarks
+        if not result.is_successful:
+            return False
         if not result.is_thermally_safe:
             return False
         if self.config_exporter.best_sustained is None:
