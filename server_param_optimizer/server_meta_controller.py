@@ -32,8 +32,8 @@ PARAM_SPACE = {
 
 # LLM configuration
 META_CONTROLLER_MODEL = "openai/gpt-oss-20b"
-MAX_SEQ_LENGTH = 4096
-MAX_COMPLETION_LENGTH = 1024
+MAX_SEQ_LENGTH = 8192
+MAX_COMPLETION_LENGTH = 4096
 
 # H100 80GB thermal configuration
 GPU_CONFIG = {
@@ -315,7 +315,7 @@ NOW GENERATE YOUR CONFIGURATIONS:
             else:
                 llm_output = generated_text
             
-            print(f"[ServerMetaController] LLM output:\n{llm_output[:500]}...")
+            print(f"[ServerMetaController] LLM raw response:\n{llm_output}")
             
             # Parse configs from output
             configs = self._parse_configs(llm_output)
