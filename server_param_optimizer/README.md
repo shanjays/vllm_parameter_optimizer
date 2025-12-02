@@ -30,6 +30,31 @@ Optimizes vLLM server parameters `--max-num-seqs` and `--max-num-batched-tokens`
 - Memory copy bandwidth analysis
 - Graceful handling when nsys is not installed
 
+### 4. Server Profiling Worker (`server_profiling_worker.py`)
+- Ray-based and local profiling workers
+- Runs vLLM throughput benchmarks with thermal monitoring
+- Parses benchmark output for throughput metrics
+
+### 5. Config Exporter (`server_config_exporter.py`)
+- Exports aggressive and sustained configurations
+- Generates bash launch scripts for easy deployment
+- Saves complete optimization results
+
+### 6. Feedback Collector (`server_feedback_collector.py`)
+- Tracks optimization history for LLM learning
+- Persists state across optimization runs
+- Generates formatted feedback for LLM prompts
+
+### 7. Meta-Controller (`server_meta_controller.py`)
+- LLM-based configuration generation using gpt-oss-20b
+- LoRA adapters for efficient fine-tuning
+- Thermal-aware configuration suggestions
+
+### 8. Main Optimizer (`server_optimizer.py`)
+- Coordinates all components
+- Runs iterative optimization loop
+- Generates final results and launch scripts
+
 ## Output Configurations
 
 The optimizer produces two configurations:
@@ -52,16 +77,66 @@ The optimizer produces two configurations:
   ```
 - nsys (NVIDIA Nsight Systems, for detailed profiling)
   - Download from [NVIDIA Developer](https://developer.nvidia.com/nsight-systems)
+- Ray (for distributed profiling)
+  ```bash
+  pip install ray
+  ```
+- Unsloth (for LLM meta-controller)
+  ```bash
+  pip install unsloth
+  ```
+
+## Usage
+
+### Full Optimization Run
+
+```bash
+cd server_param_optimizer
+python server_optimizer.py
+```
+
+This will:
+1. Run 8 optimization iterations
+2. Test 2-4 configs per iteration (LLM-guided)
+3. Run 20-minute benchmarks with thermal monitoring
+4. Save thermal plots and optimization results
+5. Generate launch scripts for best configs
+
+### Quick Test (Shorter Benchmarks)
+
+```python
+from server_param_optimizer import ServerParameterOptimizer
+
+optimizer = ServerParameterOptimizer(
+    benchmark_duration_minutes=5,  # Shorter for testing
+    num_iterations=2
+)
+optimizer.run_optimization()
+```
+
+### Output Files
+
+After optimization:
+- `config_aggressive.json` - Max throughput config
+- `config_sustained.json` - Thermal-safe config
+- `optimization_results.json` - Full results
+- `thermal_plots/*.png` - Thermal visualizations
+- `launch_scripts/*.sh` - Ready-to-run commands
 
 ## Module Structure
 
 ```
 server_param_optimizer/
-├── __init__.py              # Package exports
-├── thermal_monitor.py       # GPU thermal/power monitoring
-├── visualization.py         # PNG plot generation
-├── nsys_metrics_extractor.py # Nsys profiling integration
-└── README.md                # This file
+├── __init__.py                    # Package exports
+├── thermal_monitor.py             # GPU temp/power monitoring (PR 1)
+├── visualization.py               # Thermal plot generation (PR 1)
+├── nsys_metrics_extractor.py      # nsys profiling (PR 1)
+├── server_profiling_worker.py     # Ray benchmark worker (PR 2)
+├── server_config_exporter.py      # Config export + launch scripts (PR 2)
+├── server_feedback_collector.py   # Feedback for LLM (PR 2)
+├── server_meta_controller.py      # LLM config generation (PR 3)
+├── server_optimizer.py            # Main entry point (PR 3)
+└── README.md                      # Documentation
 ```
 
 ## Quick Start
@@ -145,6 +220,27 @@ else:
     print("nsys not installed, skipping profiling")
 ```
 
+### LLM Meta-Controller
+
+```python
+from server_param_optimizer import ServerMetaController, ServerFeedbackCollector
+
+# Create feedback collector (tracks optimization history)
+feedback = ServerFeedbackCollector()
+
+# Create meta-controller
+controller = ServerMetaController()
+
+# Generate configurations based on feedback
+configs = controller.generate_configs(feedback)
+
+for config in configs:
+    print(f"Config: {config['name']}")
+    print(f"  --max-num-seqs {config['max_num_seqs']}")
+    print(f"  --max-num-batched-tokens {config['max_num_batched_tokens']}")
+    print(f"  Rationale: {config.get('rationale', 'N/A')}")
+```
+
 ## Thermal Thresholds (A100 40GB)
 
 | Threshold | Value | Description |
@@ -157,23 +253,21 @@ else:
 
 ## Output File Structure
 
-When running the full optimizer (coming in PR 2/3):
+After running the full optimizer:
 
 ```
 ./server_optimization_results/
-├── thermal/
-│   ├── config_1_thermal.png
-│   ├── config_2_thermal.png
-│   └── comparison.png
-├── profiles/
-│   ├── config_1.nsys-rep
-│   └── config_2.nsys-rep
-├── results/
-│   ├── aggressive_config.json
-│   ├── sustained_config.json
-│   └── full_results.json
-└── logs/
-    └── optimization.log
+├── thermal_plots/
+│   ├── seqs32_tokens8192.png
+│   ├── seqs64_tokens16384.png
+│   └── ...
+├── launch_scripts/
+│   ├── launch_aggressive.sh
+│   └── launch_sustained.sh
+├── config_aggressive.json
+├── config_sustained.json
+├── optimization_results.json
+└── feedback_state.json
 ```
 
 ## API Reference
@@ -206,13 +300,20 @@ When running the full optimizer (coming in PR 2/3):
 | `get_metrics_summary()` | Get formatted metrics summary |
 | `export_to_sqlite()` | Export profile to SQLite |
 
-## Upcoming PRs
+### ServerMetaController
 
-This is PR 1 of 3:
+| Method | Description |
+|--------|-------------|
+| `generate_configs()` | Generate configs using LLM |
+| `get_param_space()` | Get valid parameter values |
+| `is_llm_available()` | Check if LLM is available |
 
-- **PR 1** (this): Core infrastructure (thermal monitoring, visualization, nsys extraction)
-- **PR 2**: Benchmark runner and parameter search
-- **PR 3**: Full optimization loop and result reporting
+### ServerParameterOptimizer
+
+| Method | Description |
+|--------|-------------|
+| `run_optimization()` | Run full optimization loop |
+| `print_final_summary()` | Print results summary |
 
 ## License
 
