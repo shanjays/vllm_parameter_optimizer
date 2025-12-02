@@ -9,6 +9,7 @@ Target: NVIDIA A100 40GB with meta-llama/Llama-3.1-8B-Instruct
 """
 
 import json
+import os
 import re
 import ast
 from typing import Dict, List, Optional, Any
@@ -70,25 +71,38 @@ class ServerMetaController:
     def __init__(
         self,
         model_name: str = META_CONTROLLER_MODEL,
-        device: str = "cuda"
+        gpu_id: int = 0,
+        max_seq_length: int = MAX_SEQ_LENGTH,
+        load_in_4bit: bool = True
     ):
         """Initialize the meta-controller.
         
         Args:
             model_name: LLM model to use for config generation
-            device: Device to run the model on ('cuda' or 'cpu')
+            gpu_id: GPU device index for LLM
+            max_seq_length: Maximum sequence length
+            load_in_4bit: Whether to load in 4-bit quantization
         """
         self.model_name = model_name
-        self.device = device
+        self.gpu_id = gpu_id
+        self.max_seq_length = max_seq_length
+        self.load_in_4bit = load_in_4bit
+        
         self.llm = None
         self.tokenizer = None
         self._initialized = False
         
+        # Set device
+        if LLM_AVAILABLE and torch is not None and torch.cuda.is_available():
+            self.device = f"cuda:{gpu_id}"
+        else:
+            self.device = "cpu"
+        
         print(f"[ServerMetaController] Configured with model: {model_name}")
-        print(f"[ServerMetaController] Device: {device}")
+        print(f"[ServerMetaController] Device: {self.device}")
     
     def _load_model(self) -> None:
-        """Load the LLM with LoRA adapters."""
+        """Load the LLM with LoRA adapters on the specified GPU."""
         if self._initialized:
             return
             
@@ -97,14 +111,19 @@ class ServerMetaController:
             self._initialized = True
             return
         
-        print(f"[ServerMetaController] Loading LLM '{self.model_name}'...")
+        print(f"[ServerMetaController] Loading LLM '{self.model_name}' on GPU {self.gpu_id}...")
+        
+        # Save current CUDA device and set to our GPU
+        prev_cuda = os.environ.get("CUDA_VISIBLE_DEVICES")
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
         
         try:
             # Load model with Unsloth optimization (same pattern as hierarchical_kernel_optimizer.py)
             self.llm, self.tokenizer = FastLanguageModel.from_pretrained(
                 model_name=self.model_name,
-                max_seq_length=MAX_SEQ_LENGTH,
-                load_in_4bit=True,
+                max_seq_length=self.max_seq_length,
+                load_in_4bit=self.load_in_4bit,
+                device_map={"": self.gpu_id},  # Explicit GPU mapping
             )
             
             print("[ServerMetaController] Adding LoRA adapters...")
@@ -124,13 +143,19 @@ class ServerMetaController:
                 task_type="CAUSAL_LM",
             )
             
-            print("[ServerMetaController] LLM loaded successfully")
+            print(f"[ServerMetaController] LLM loaded successfully on GPU {self.gpu_id}")
             self._initialized = True
             
         except Exception as e:
             print(f"[ServerMetaController] Error loading LLM: {e}")
             print("[ServerMetaController] Falling back to default configs")
             self._initialized = True
+        finally:
+            # Restore previous CUDA setting
+            if prev_cuda is not None:
+                os.environ["CUDA_VISIBLE_DEVICES"] = prev_cuda
+            elif "CUDA_VISIBLE_DEVICES" in os.environ:
+                del os.environ["CUDA_VISIBLE_DEVICES"]
     
     def generate_configs(
         self,

@@ -25,7 +25,13 @@ from .server_profiling_worker import (
 from .server_config_exporter import ServerConfigExporter, ServerConfig
 from .server_feedback_collector import ServerFeedbackCollector, IterationFeedback
 from .server_meta_controller import ServerMetaController, PARAM_SPACE
-from .server_optimizer import ServerParameterOptimizer
+from .server_optimizer import (
+    ServerParameterOptimizer,
+    LLM_GPU_ID,
+    BENCHMARK_GPU_ID,
+    get_available_gpus,
+    validate_gpu_assignment
+)
 
 __all__ = [
     # Thermal monitoring (PR 1)
@@ -60,4 +66,9 @@ __all__ = [
     'ServerMetaController',
     'PARAM_SPACE',
     'ServerParameterOptimizer',
+    # GPU utilities
+    'LLM_GPU_ID',
+    'BENCHMARK_GPU_ID',
+    'get_available_gpus',
+    'validate_gpu_assignment',
 ]

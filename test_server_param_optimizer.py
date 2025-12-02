@@ -1848,6 +1848,142 @@ def test_server_optimizer_module_import():
 
 
 # ============================================================
+# Multi-GPU Support Tests
+# ============================================================
+
+def test_gpu_id_defaults():
+    """Test default GPU ID constants."""
+    from server_param_optimizer import LLM_GPU_ID, BENCHMARK_GPU_ID
+    
+    assert LLM_GPU_ID == 0
+    assert BENCHMARK_GPU_ID == 1
+    
+    print("✅ test_gpu_id_defaults PASSED")
+
+
+def test_get_available_gpus():
+    """Test get_available_gpus function."""
+    from server_param_optimizer import get_available_gpus
+    
+    gpus = get_available_gpus()
+    
+    assert isinstance(gpus, list)
+    assert len(gpus) >= 1
+    assert all(isinstance(g, int) for g in gpus)
+    # GPU 0 should always be in the list (at minimum)
+    assert 0 in gpus
+    
+    print("✅ test_get_available_gpus PASSED")
+
+
+def test_validate_gpu_assignment():
+    """Test validate_gpu_assignment warning function."""
+    from server_param_optimizer import validate_gpu_assignment
+    import io
+    import sys
+    
+    # Test same GPU warning
+    captured_output = io.StringIO()
+    sys.stdout = captured_output
+    
+    try:
+        validate_gpu_assignment(0, 0)
+    finally:
+        sys.stdout = sys.__stdout__
+    
+    output = captured_output.getvalue()
+    assert "SAME GPU" in output
+    assert "VRAM conflicts" in output
+    
+    print("✅ test_validate_gpu_assignment PASSED")
+
+
+def test_server_meta_controller_gpu_id():
+    """Test ServerMetaController with gpu_id parameter."""
+    from server_param_optimizer.server_meta_controller import ServerMetaController
+    
+    # Test with explicit gpu_id
+    controller = ServerMetaController(gpu_id=2)
+    
+    assert controller.gpu_id == 2
+    # Device should include the GPU ID
+    assert "2" in controller.device or controller.device == "cpu"
+    
+    print("✅ test_server_meta_controller_gpu_id PASSED")
+
+
+def test_server_optimizer_gpu_separation():
+    """Test ServerParameterOptimizer with separate GPU IDs."""
+    from server_param_optimizer.server_optimizer import ServerParameterOptimizer
+    
+    temp_dir = tempfile.mkdtemp()
+    try:
+        optimizer = ServerParameterOptimizer(
+            output_dir=temp_dir,
+            benchmark_duration_minutes=1,
+            num_iterations=1,
+            llm_gpu_id=0,
+            benchmark_gpu_id=2
+        )
+        
+        assert optimizer.llm_gpu_id == 0
+        assert optimizer.benchmark_gpu_id == 2
+        assert optimizer.meta_controller.gpu_id == 0
+        assert optimizer.worker.gpu_id == 2
+        
+        print("✅ test_server_optimizer_gpu_separation PASSED")
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_server_optimizer_same_gpu_warning():
+    """Test ServerParameterOptimizer warns when using same GPU."""
+    from server_param_optimizer.server_optimizer import ServerParameterOptimizer
+    import io
+    import sys
+    
+    temp_dir = tempfile.mkdtemp()
+    captured_output = io.StringIO()
+    sys.stdout = captured_output
+    
+    try:
+        optimizer = ServerParameterOptimizer(
+            output_dir=temp_dir,
+            benchmark_duration_minutes=1,
+            num_iterations=1,
+            llm_gpu_id=0,
+            benchmark_gpu_id=0  # Same GPU
+        )
+        
+        output = captured_output.getvalue()
+        
+        # Should warn about same GPU usage
+        assert "SAME GPU" in output
+    finally:
+        sys.stdout = sys.__stdout__
+        shutil.rmtree(temp_dir)
+    
+    print("✅ test_server_optimizer_same_gpu_warning PASSED")
+
+
+def test_module_exports_gpu_utilities():
+    """Test that GPU utility functions are exported from the module."""
+    from server_param_optimizer import (
+        LLM_GPU_ID,
+        BENCHMARK_GPU_ID,
+        get_available_gpus,
+        validate_gpu_assignment
+    )
+    
+    assert LLM_GPU_ID is not None
+    assert BENCHMARK_GPU_ID is not None
+    assert callable(get_available_gpus)
+    assert callable(validate_gpu_assignment)
+    
+    print("✅ test_module_exports_gpu_utilities PASSED")
+
+
+# ============================================================
 # Main Test Runner
 # ============================================================
 
@@ -1967,6 +2103,15 @@ if __name__ == "__main__":
     print("\n=== ServerParameterOptimizer Tests ===")
     test_server_optimizer_init()
     test_server_optimizer_module_import()
+    
+    print("\n=== Multi-GPU Support Tests ===")
+    test_gpu_id_defaults()
+    test_get_available_gpus()
+    test_validate_gpu_assignment()
+    test_server_meta_controller_gpu_id()
+    test_server_optimizer_gpu_separation()
+    test_server_optimizer_same_gpu_warning()
+    test_module_exports_gpu_utilities()
     
     print("\n" + "="*60)
     print("✅ ALL SERVER PARAMETER OPTIMIZER TESTS PASSED")
