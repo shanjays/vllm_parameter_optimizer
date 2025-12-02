@@ -12,7 +12,7 @@ import json
 import os
 import tempfile
 import shutil
-from config_exporter import VLLMConfigExporter
+from config_exporter import VLLMConfigExporter, TOKEN_COUNTS_ALL
 
 
 def test_get_config_filename():
@@ -161,7 +161,6 @@ def test_save_vllm_config_sorted_keys():
             vllm_config = json.load(f)
         
         # Now all token counts should be present (with defaults)
-        from config_exporter import TOKEN_COUNTS_ALL
         assert len(vllm_config) == len(TOKEN_COUNTS_ALL), f"Should have all {len(TOKEN_COUNTS_ALL)} token counts"
         
         # Verify the manually set configs have our values
@@ -189,7 +188,6 @@ def test_get_summary():
         summary = exporter.get_summary()
         
         # All token counts are initialized with defaults
-        from config_exporter import TOKEN_COUNTS_ALL
         assert summary["total_token_counts"] == len(TOKEN_COUNTS_ALL), f"Should have all {len(TOKEN_COUNTS_ALL)} token counts"
         assert summary["total_experiments"] == 3, "Should have 3 experiments"
         assert summary["tested_token_counts"] == 2, "Should have 2 tested token counts with reward > 0"
@@ -234,7 +232,6 @@ def test_multiple_token_counts():
             exporter.update_best_config(tc, config, reward=50.0 + tc * 0.01)
         
         # All token counts are initialized with defaults, so best_configs has all of them
-        from config_exporter import TOKEN_COUNTS_ALL
         assert len(exporter.best_configs) == len(TOKEN_COUNTS_ALL), f"Should have {len(TOKEN_COUNTS_ALL)} configs (all initialized)"
         assert len(exporter.all_results) == len(token_counts), f"Should have {len(token_counts)} results"
         
@@ -274,7 +271,6 @@ def test_export_complete_config_interpolation():
             complete_config = json.load(f)
         
         # Check that all expected token counts are present
-        from config_exporter import TOKEN_COUNTS_ALL
         assert len(complete_config) == len(TOKEN_COUNTS_ALL), f"Should have {len(TOKEN_COUNTS_ALL)} entries"
         
         # Check interpolation worked
@@ -310,8 +306,6 @@ def test_find_nearest_config():
 
 def test_all_token_counts_constant():
     """Test that TOKEN_COUNTS_ALL is properly defined."""
-    from config_exporter import TOKEN_COUNTS_ALL
-    
     # Should have the expected vLLM token counts
     assert 1 in TOKEN_COUNTS_ALL, "Should include 1"
     assert 4096 in TOKEN_COUNTS_ALL, "Should include 4096"
@@ -338,7 +332,6 @@ def test_initialization_creates_config_with_defaults():
             config = json.load(f)
         
         # Should have all token counts
-        from config_exporter import TOKEN_COUNTS_ALL
         assert len(config) == len(TOKEN_COUNTS_ALL), f"Should have all {len(TOKEN_COUNTS_ALL)} token counts"
         
         # Each should have default values
@@ -428,7 +421,6 @@ def test_corrupt_config_file_creates_new():
         exporter = VLLMConfigExporter(num_experts=32, inter_size=512, device_name="TEST_GPU", output_dir=temp_dir)
         
         # Verify the config was recreated with defaults
-        from config_exporter import TOKEN_COUNTS_ALL
         assert len(exporter.best_configs) == len(TOKEN_COUNTS_ALL), "Should have all token counts with defaults"
         
         # Verify the file is now valid
@@ -484,7 +476,6 @@ def test_config_filters_default_key():
                 raise AssertionError(f"Config contains non-integer key: {key}")
         
         # Verify it has all standard token counts
-        from config_exporter import TOKEN_COUNTS_ALL
         assert len(config) == len(TOKEN_COUNTS_ALL), f"Should have all {len(TOKEN_COUNTS_ALL)} token counts"
         
         print("✅ test_config_filters_default_key PASSED")

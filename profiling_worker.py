@@ -7,15 +7,18 @@ import numpy as np
 from io import StringIO
 import time
 
+# Import shared constants from config_exporter to ensure consistency
+from config_exporter import TOKEN_COUNTS_ALL
+
 DEFAULT_CONFIG = {
     "BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32,
     "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4,
 }
 
-# Standard token counts that vLLM expects - DO NOT include 'default' key!
+# Standard token counts - use the same as config_exporter for consistency
 # vLLM's get_moe_configs() does: {int(key): val for key, val in tuned_config.items()}
 # This fails if key = 'default' or any non-integer string
-STANDARD_TOKEN_COUNTS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096]
+STANDARD_TOKEN_COUNTS = TOKEN_COUNTS_ALL
 
 # Default kernel configuration for vLLM config files
 VLLM_DEFAULT_KERNEL_CONFIG = {
