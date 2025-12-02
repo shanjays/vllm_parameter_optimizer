@@ -7,18 +7,15 @@ import numpy as np
 from io import StringIO
 import time
 
-# Import shared constants from config_exporter to ensure consistency
+# Import shared constant from config_exporter to ensure consistency across modules
+# vLLM's get_moe_configs() does: {int(key): val for key, val in tuned_config.items()}
+# This fails if key = 'default' or any non-integer string
 from config_exporter import TOKEN_COUNTS_ALL
 
 DEFAULT_CONFIG = {
     "BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32,
     "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4,
 }
-
-# Standard token counts - use the same as config_exporter for consistency
-# vLLM's get_moe_configs() does: {int(key): val for key, val in tuned_config.items()}
-# This fails if key = 'default' or any non-integer string
-STANDARD_TOKEN_COUNTS = TOKEN_COUNTS_ALL
 
 # Default kernel configuration for vLLM config files
 VLLM_DEFAULT_KERNEL_CONFIG = {
@@ -700,15 +697,15 @@ class ProfilingWorker:
         if params_dict:
             config_entry.update(params_dict)
         
-        # Ensure all required keys are present
+        # Ensure all required keys are present (use VLLM_DEFAULT_KERNEL_CONFIG for fallbacks)
         required_keys = ["BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "num_warps", "num_stages"]
         for key in required_keys:
             if key not in config_entry:
-                config_entry[key] = VLLM_DEFAULT_KERNEL_CONFIG.get(key, 64)
+                config_entry[key] = VLLM_DEFAULT_KERNEL_CONFIG[key]
         
-        # Build config with ALL standard token counts - NO 'default' key!
+        # Build config with ALL token counts from config_exporter - NO 'default' key!
         vllm_config = {}
-        for tc in STANDARD_TOKEN_COUNTS:
+        for tc in TOKEN_COUNTS_ALL:
             vllm_config[str(tc)] = config_entry.copy()
         
         return vllm_config
