@@ -349,7 +349,7 @@ class ProfilingWorker:
 
     def run_throughput_validation(self, params_dict, model_name, user_goal):
         """
-        Run throughput validation using vLLM benchmarking.
+        Run throughput validation using vLLM benchmarking with comprehensive error checking.
         
         This method validates kernel configurations by running actual
         inference throughput tests with vLLM.
@@ -362,6 +362,8 @@ class ProfilingWorker:
         Returns:
             float: Throughput metric in tokens/sec
         """
+        import traceback
+        
         try:
             import vllm
         except ImportError:
@@ -393,6 +395,21 @@ class ProfilingWorker:
         except Exception as e:
             print(f"[ProfilingWorker] ERROR: Failed to write vLLM config file. {e}")
             return 0.0
+        
+        # Validate config file
+        if not self._validate_config_file(config_path):
+            print("[ProfilingWorker] Skipping benchmark due to config validation failure")
+            if os.path.exists(config_path):
+                os.remove(config_path)
+            return 0.0
+        
+        # Check dataset exists
+        dataset_path = "ShareGPT_Vicuna_unfiltered.json"
+        if not self._check_dataset_exists(dataset_path):
+            print("[ProfilingWorker] Skipping benchmark due to missing dataset")
+            if os.path.exists(config_path):
+                os.remove(config_path)
+            return 0.0
             
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
@@ -409,7 +426,7 @@ class ProfilingWorker:
         command = [
             "python", "-m", "vllm.entrypoints.cli.main", "bench", "throughput",
             "--model", model_name,
-            "--dataset-path", "ShareGPT_Vicuna_unfiltered.json", 
+            "--dataset-path", dataset_path, 
             "--num-prompts", "40",              # Reduced from 100 for faster iterations
             "--trust-remote-code",
             "--enforce-eager", 
@@ -418,19 +435,41 @@ class ProfilingWorker:
             "--gpu-memory-utilization", "0.90",  # Aggressive (was 0.85)
         ]
         
+        print(f"[ProfilingWorker] Running: {' '.join(command)}")
+        
         try:
-            print(f"[ProfilingWorker] Running throughput validation: {' '.join(command)}")
             result = subprocess.run(
                 command, 
                 env=env, 
-                check=True, 
                 capture_output=True, 
                 text=True, 
-                timeout=600  # Increased timeout for model loading
+                timeout=600  # 10 minute timeout for model loading
             )
+            
+            # Always print output for debugging
+            if result.stdout:
+                print(f"[ProfilingWorker] STDOUT:\n{result.stdout[-2000:]}")  # Last 2000 chars
+            
+            if result.returncode != 0:
+                print(f"[ProfilingWorker] ERROR: vllm bench failed. Return code: {result.returncode}")
+                if result.stderr:
+                    print(f"[ProfilingWorker] STDERR:\n{result.stderr[-2000:]}")  # Last 2000 chars
+                
+                # Categorize and report the error
+                full_output = (result.stdout or "") + (result.stderr or "")
+                self._categorize_vllm_error(full_output)
+                
+                if os.path.exists(config_path):
+                    os.remove(config_path)
+                return 0.0
+            
             output = result.stdout
             
-            metric = self._parse_vllm_bench_output(output, user_goal)
+            # Try new parser first, fall back to legacy parser
+            metric = self._parse_throughput(output)
+            if metric == 0.0:
+                metric = self._parse_vllm_bench_output(output, user_goal)
+            
             print(f"[ProfilingWorker] Throughput validation result: {metric} tokens/sec")
             
             # Clean up config file
@@ -438,21 +477,17 @@ class ProfilingWorker:
                 os.remove(config_path)
             return metric
 
-        except subprocess.CalledProcessError as e:
-            print(f"[ProfilingWorker] ERROR: vllm bench failed. Return code: {e.returncode}")
-            print(f"[ProfilingWorker] STDERR: {e.stderr[:500] if e.stderr else 'None'}")
-            if os.path.exists(config_path):
-                os.remove(config_path)
-            return 0.0
-            
-        except subprocess.TimeoutExpired:
-            print(f"[ProfilingWorker] ERROR: vllm bench timed out after 600s")
+        except subprocess.TimeoutExpired as e:
+            print("[ProfilingWorker] ERROR: vLLM benchmark timed out after 600 seconds")
+            # Try to get partial output
+            self._print_partial_output(e)
             if os.path.exists(config_path):
                 os.remove(config_path)
             return 0.0
             
         except Exception as e:
-            print(f"[ProfilingWorker] ERROR: vllm bench failed with exception: {e}")
+            print(f"[ProfilingWorker] ERROR: Exception during benchmark: {type(e).__name__}: {e}")
+            traceback.print_exc()
             if os.path.exists(config_path):
                 os.remove(config_path)
             return 0.0
@@ -473,6 +508,131 @@ class ProfilingWorker:
             
         print(f"[ProfilingWorker] ERROR: Could not parse vllM bench output.")
         return 0.0
+
+    def _parse_throughput(self, stdout: str) -> float:
+        """Parse throughput from vLLM benchmark output using multiple regex patterns."""
+        import re
+        
+        # Try different patterns
+        patterns = [
+            r"Throughput:\s*([0-9.]+)\s*requests/s,\s*([0-9.]+)\s*tokens/s",
+            r"([0-9.]+)\s*tokens/s",
+            r"tokens/s[:\s]*([0-9.]+)",
+            r"Throughput[:\s]*([0-9.]+)",
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, stdout)
+            if match:
+                # Get the last group (tokens/s value)
+                value = float(match.group(match.lastindex))
+                return value
+        
+        print(f"[ProfilingWorker] WARNING: Could not parse throughput from output")
+        print(f"[ProfilingWorker] Output sample: {stdout[-500:]}")
+        return 0.0
+
+    def _validate_config_file(self, config_path: str) -> bool:
+        """Validate the config file before running benchmark."""
+        if not os.path.exists(config_path):
+            print(f"[ProfilingWorker] ERROR: Config file does not exist: {config_path}")
+            return False
+        
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            
+            if not config:
+                print(f"[ProfilingWorker] ERROR: Config file is empty")
+                return False
+            
+            # Check that we have at least some token counts
+            print(f"[ProfilingWorker] Config has {len(config)} token counts: {list(config.keys())[:5]}...")
+            
+            # Validate each config entry
+            required_keys = ["BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "num_warps", "num_stages"]
+            for tc, params in config.items():
+                if not isinstance(params, dict):
+                    continue
+                missing = [k for k in required_keys if k not in params]
+                if missing:
+                    print(f"[ProfilingWorker] WARNING: Token count {tc} missing keys: {missing}")
+            
+            return True
+            
+        except json.JSONDecodeError as e:
+            print(f"[ProfilingWorker] ERROR: Invalid JSON in config file: {e}")
+            return False
+        except Exception as e:
+            print(f"[ProfilingWorker] ERROR: Could not read config file: {e}")
+            return False
+
+    def _print_partial_output(self, exception) -> None:
+        """Helper to print partial output from a TimeoutExpired exception."""
+        if hasattr(exception, 'stdout') and exception.stdout:
+            stdout = exception.stdout
+            if not isinstance(stdout, str):
+                stdout = stdout.decode('utf-8', errors='replace')
+            print(f"[ProfilingWorker] Partial STDOUT:\n{stdout[-1000:]}")
+        if hasattr(exception, 'stderr') and exception.stderr:
+            stderr = exception.stderr
+            if not isinstance(stderr, str):
+                stderr = stderr.decode('utf-8', errors='replace')
+            print(f"[ProfilingWorker] Partial STDERR:\n{stderr[-1000:]}")
+
+    def _check_dataset_exists(self, dataset_path: str) -> bool:
+        """Check if the dataset file exists."""
+        if not os.path.exists(dataset_path):
+            print(f"[ProfilingWorker] ERROR: Dataset file not found: {dataset_path}")
+            print(f"[ProfilingWorker] Current directory: {os.getcwd()}")
+            files = os.listdir('.')
+            print(f"[ProfilingWorker] Files in current directory: {files[:10]}")
+            return False
+        return True
+
+    def _categorize_vllm_error(self, full_output: str) -> str:
+        """Categorize vLLM benchmark error and print appropriate message."""
+        import re
+        
+        if "CUDA out of memory" in full_output:
+            print("[ProfilingWorker] ERROR TYPE: CUDA OOM - reduce batch size or model size")
+            return "cuda_oom"
+        elif "FileNotFoundError" in full_output:
+            print("[ProfilingWorker] ERROR TYPE: File not found - check dataset path")
+            return "file_not_found"
+        elif "KeyError" in full_output:
+            # Extract the KeyError details
+            key_error = re.search(r"KeyError: ['\"]?(\d+)['\"]?", full_output)
+            if key_error:
+                print(f"[ProfilingWorker] ERROR TYPE: KeyError for token count {key_error.group(1)} - config missing this key")
+            else:
+                key_error_generic = re.search(r"KeyError: (.+?)(?:\n|$)", full_output)
+                if key_error_generic:
+                    print(f"[ProfilingWorker] ERROR TYPE: KeyError - {key_error_generic.group(1)[:100]}")
+            return "key_error"
+        elif "JSONDecodeError" in full_output:
+            print("[ProfilingWorker] ERROR TYPE: Invalid JSON in config file")
+            return "json_error"
+        elif "RuntimeError" in full_output:
+            runtime_error = re.search(r"RuntimeError: (.+?)(?:\n|$)", full_output)
+            if runtime_error:
+                print(f"[ProfilingWorker] ERROR TYPE: RuntimeError - {runtime_error.group(1)[:200]}")
+            return "runtime_error"
+        elif "ModuleNotFoundError" in full_output:
+            print("[ProfilingWorker] ERROR TYPE: Missing module - check vLLM installation")
+            return "module_not_found"
+        elif "AssertionError" in full_output:
+            assertion_error = re.search(r"AssertionError: (.+?)(?:\n|$)", full_output)
+            if assertion_error:
+                print(f"[ProfilingWorker] ERROR TYPE: AssertionError - {assertion_error.group(1)[:200]}")
+            return "assertion_error"
+        else:
+            # Print last 20 lines of combined output to find the error
+            lines = full_output.strip().split('\n')
+            print(f"[ProfilingWorker] Last 20 lines of output:")
+            for line in lines[-20:]:
+                print(f"  {line}")
+            return "unknown"
 
     def run_fast_gym_benchmark(self, params_dict, static_args, reward_weights, num_tokens=None):
         """Legacy method for backward compatibility."""
