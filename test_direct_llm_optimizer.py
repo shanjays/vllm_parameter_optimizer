@@ -186,6 +186,7 @@ def test_parse_configs_invalid_json():
     """Test parsing invalid/malformed JSON."""
     optimizer = _create_mock_optimizer()
     
+    # JSON with syntax error (missing comma between values)
     llm_output = '''
 <param>
 {
@@ -193,7 +194,7 @@ def test_parse_configs_invalid_json():
     {
       "BLOCK_SIZE_M": 64,
       "BLOCK_SIZE_N": 64
-      missing comma here
+      "num_warps": 8
     }
   ]
 }
@@ -311,19 +312,13 @@ def test_check_shared_memory_limit_invalid():
         "num_stages": 5
     }
     
-    # (128*64 + 64*128) * 2 * 5 = (8192 + 8192) * 10 = 163840 bytes
-    # Still under 232448, so this should pass
+    # Calculate shared memory: (M*K + K*N) * 2 * stages
+    # = (128*64 + 64*128) * 2 * 5 = (8192 + 8192) * 10 = 163840 bytes
+    # H100 limit is 232448 bytes, so 163840 < 232448 = valid config
     result = optimizer._check_shared_memory_limit(config)
     
-    # Let's calculate more precisely
-    M, N, K, stages = 128, 128, 64, 5
-    shared_mem = (M * K + K * N) * 2 * stages
-    # = (8192 + 8192) * 10 = 163840
-    
-    if shared_mem <= 232448:
-        assert result is True
-    else:
-        assert result is False
+    # This config is under the limit, so it should pass
+    assert result is True
     
     print("✅ test_check_shared_memory_limit_invalid PASSED")
 
