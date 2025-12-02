@@ -775,6 +775,215 @@ def test_benchmark_result_with_thermal_summary():
 
 
 # ============================================================
+# Error Classification and Penalty Tests
+# ============================================================
+
+def test_benchmark_error_type_enum():
+    """Test BenchmarkErrorType enum values."""
+    from server_param_optimizer.server_profiling_worker import BenchmarkErrorType
+    
+    assert BenchmarkErrorType.NONE.value == "none"
+    assert BenchmarkErrorType.VRAM_OOM.value == "vram_oom"
+    assert BenchmarkErrorType.CUDA_ERROR.value == "cuda_error"
+    assert BenchmarkErrorType.ENGINE_INIT_FAILED.value == "engine_init_failed"
+    assert BenchmarkErrorType.TIMEOUT.value == "timeout"
+    assert BenchmarkErrorType.INVALID_CONFIG.value == "invalid_config"
+    assert BenchmarkErrorType.UNKNOWN.value == "unknown"
+    
+    print("✅ test_benchmark_error_type_enum PASSED")
+
+
+def test_classify_error_vram_oom():
+    """Test classify_error for VRAM/OOM errors."""
+    from server_param_optimizer.server_profiling_worker import classify_error, BenchmarkErrorType
+    
+    # Various OOM error patterns
+    assert classify_error("CUDA out of memory") == BenchmarkErrorType.VRAM_OOM
+    assert classify_error("torch.cuda.OutOfMemoryError") == BenchmarkErrorType.VRAM_OOM
+    assert classify_error("RuntimeError: Out of memory") == BenchmarkErrorType.VRAM_OOM
+    assert classify_error("Cannot allocate VRAM") == BenchmarkErrorType.VRAM_OOM
+    assert classify_error("Memory allocation failed") == BenchmarkErrorType.VRAM_OOM
+    
+    print("✅ test_classify_error_vram_oom PASSED")
+
+
+def test_classify_error_engine_init():
+    """Test classify_error for engine initialization failures."""
+    from server_param_optimizer.server_profiling_worker import classify_error, BenchmarkErrorType
+    
+    # Engine init error patterns
+    assert classify_error("RuntimeError: Engine core initialization failed. See root cause above.") == BenchmarkErrorType.ENGINE_INIT_FAILED
+    assert classify_error("Failed to initialize vLLM engine") == BenchmarkErrorType.ENGINE_INIT_FAILED
+    assert classify_error("Failed core proc(s): {}") == BenchmarkErrorType.ENGINE_INIT_FAILED
+    
+    print("✅ test_classify_error_engine_init PASSED")
+
+
+def test_classify_error_cuda():
+    """Test classify_error for CUDA errors."""
+    from server_param_optimizer.server_profiling_worker import classify_error, BenchmarkErrorType
+    
+    # CUDA error patterns
+    assert classify_error("CUDA error: device-side assert triggered") == BenchmarkErrorType.CUDA_ERROR
+    assert classify_error("cudnn error") == BenchmarkErrorType.CUDA_ERROR
+    assert classify_error("cublas error") == BenchmarkErrorType.CUDA_ERROR
+    
+    print("✅ test_classify_error_cuda PASSED")
+
+
+def test_classify_error_timeout():
+    """Test classify_error for timeout errors."""
+    from server_param_optimizer.server_profiling_worker import classify_error, BenchmarkErrorType
+    
+    # Timeout patterns
+    assert classify_error("Benchmark timed out after 22 minutes") == BenchmarkErrorType.TIMEOUT
+    assert classify_error("Process timeout exceeded") == BenchmarkErrorType.TIMEOUT
+    
+    print("✅ test_classify_error_timeout PASSED")
+
+
+def test_classify_error_invalid_config():
+    """Test classify_error for invalid config errors."""
+    from server_param_optimizer.server_profiling_worker import classify_error, BenchmarkErrorType
+    
+    # Invalid config patterns
+    assert classify_error("max_num_batched_tokens must be >= max_num_seqs") == BenchmarkErrorType.INVALID_CONFIG
+    assert classify_error("Invalid value for max_num_seqs") == BenchmarkErrorType.INVALID_CONFIG
+    
+    print("✅ test_classify_error_invalid_config PASSED")
+
+
+def test_classify_error_none():
+    """Test classify_error returns NONE for empty errors."""
+    from server_param_optimizer.server_profiling_worker import classify_error, BenchmarkErrorType
+    
+    assert classify_error("") == BenchmarkErrorType.NONE
+    assert classify_error(None) == BenchmarkErrorType.NONE
+    
+    print("✅ test_classify_error_none PASSED")
+
+
+def test_classify_error_unknown():
+    """Test classify_error returns UNKNOWN for unrecognized errors."""
+    from server_param_optimizer.server_profiling_worker import classify_error, BenchmarkErrorType
+    
+    assert classify_error("Some random error message that doesn't match") == BenchmarkErrorType.UNKNOWN
+    
+    print("✅ test_classify_error_unknown PASSED")
+
+
+def test_get_error_penalty():
+    """Test get_error_penalty returns correct penalties."""
+    from server_param_optimizer.server_profiling_worker import get_error_penalty, BenchmarkErrorType
+    
+    assert get_error_penalty(BenchmarkErrorType.NONE) == 0.0
+    assert get_error_penalty(BenchmarkErrorType.VRAM_OOM) == -100.0
+    assert get_error_penalty(BenchmarkErrorType.ENGINE_INIT_FAILED) == -80.0
+    assert get_error_penalty(BenchmarkErrorType.CUDA_ERROR) == -50.0
+    assert get_error_penalty(BenchmarkErrorType.TIMEOUT) == -30.0
+    assert get_error_penalty(BenchmarkErrorType.INVALID_CONFIG) == -20.0
+    assert get_error_penalty(BenchmarkErrorType.UNKNOWN) == -10.0
+    
+    print("✅ test_get_error_penalty PASSED")
+
+
+def test_benchmark_result_is_successful():
+    """Test BenchmarkResult.is_successful property."""
+    from server_param_optimizer.server_profiling_worker import BenchmarkResult, BenchmarkErrorType
+    
+    # Successful result
+    success_result = BenchmarkResult(
+        config={'max_num_seqs': 64},
+        throughput=1500.0,
+        output_throughput=1200.0,
+        latency=None,
+        thermal_summary=None,
+        is_thermally_safe=True,
+        nsys_metrics=None,
+        duration=60.0,
+        error=""
+    )
+    assert success_result.is_successful == True
+    assert success_result.effective_throughput == 1500.0
+    
+    # Failed result with error
+    failed_result = BenchmarkResult(
+        config={'max_num_seqs': 128},
+        throughput=0.0,
+        output_throughput=0.0,
+        latency=None,
+        thermal_summary=None,
+        is_thermally_safe=False,
+        nsys_metrics=None,
+        duration=10.0,
+        error="CUDA out of memory",
+        error_type=BenchmarkErrorType.VRAM_OOM,
+        penalty=-100.0
+    )
+    assert failed_result.is_successful == False
+    assert failed_result.effective_throughput == -100.0
+    
+    print("✅ test_benchmark_result_is_successful PASSED")
+
+
+def test_benchmark_result_with_error_type():
+    """Test BenchmarkResult with error classification."""
+    from server_param_optimizer.server_profiling_worker import BenchmarkResult, BenchmarkErrorType
+    
+    result = BenchmarkResult(
+        config={'max_num_seqs': 256, 'max_num_batched_tokens': 32768},
+        throughput=0.0,
+        output_throughput=0.0,
+        latency=None,
+        thermal_summary=None,
+        is_thermally_safe=False,
+        nsys_metrics=None,
+        duration=5.0,
+        error="RuntimeError: Engine core initialization failed",
+        error_type=BenchmarkErrorType.ENGINE_INIT_FAILED,
+        penalty=-80.0
+    )
+    
+    d = result.to_dict()
+    
+    assert d['error_type'] == 'engine_init_failed'
+    assert d['penalty'] == -80.0
+    assert d['is_successful'] == False
+    assert d['effective_throughput'] == -80.0
+    
+    print("✅ test_benchmark_result_with_error_type PASSED")
+
+
+def test_log_error_details():
+    """Test log_error_details function."""
+    from server_param_optimizer.server_profiling_worker import log_error_details
+    import io
+    import sys
+    
+    # Capture stdout
+    captured_output = io.StringIO()
+    sys.stdout = captured_output
+    
+    try:
+        log_error_details(
+            "CUDA out of memory when allocating tensor",
+            {'max_num_seqs': 128, 'max_num_batched_tokens': 32768}
+        )
+    finally:
+        sys.stdout = sys.__stdout__
+    
+    output = captured_output.getvalue()
+    
+    assert "[BENCHMARK ERROR]" in output
+    assert "vram_oom" in output
+    assert "-100.0" in output
+    assert "max_num_seqs=128" in output
+    assert "[DEBUG HINT]" in output
+    
+    print("✅ test_log_error_details PASSED")
+
+
+# ============================================================
 # ServerProfilingWorkerLocal Tests
 # ============================================================
 
@@ -964,6 +1173,64 @@ def test_server_config_exporter_update_best_configs():
         assert exporter.best_sustained.throughput == 1200.0  # Should not change
         
         print("✅ test_server_config_exporter_update_best_configs PASSED")
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_server_config_exporter_skips_failed_benchmarks():
+    """Test ServerConfigExporter skips failed benchmarks."""
+    from server_param_optimizer.server_config_exporter import ServerConfigExporter
+    from server_param_optimizer.server_profiling_worker import BenchmarkResult, BenchmarkErrorType
+    
+    temp_dir = tempfile.mkdtemp()
+    try:
+        exporter = ServerConfigExporter(output_dir=temp_dir)
+        
+        # Create a failed result (simulating OOM)
+        failed_result = BenchmarkResult(
+            config={'max_num_seqs': 256, 'max_num_batched_tokens': 32768},
+            throughput=0.0,
+            output_throughput=0.0,
+            latency=None,
+            thermal_summary=None,
+            is_thermally_safe=False,
+            nsys_metrics=None,
+            duration=5.0,
+            error="CUDA out of memory",
+            error_type=BenchmarkErrorType.VRAM_OOM,
+            penalty=-100.0
+        )
+        
+        # Failed benchmark should not update best configs
+        updated = exporter.update_best_configs(failed_result)
+        assert updated == False
+        assert exporter.best_aggressive is None
+        assert exporter.best_sustained is None
+        
+        # Now add a successful result
+        success_result = BenchmarkResult(
+            config={'max_num_seqs': 64, 'max_num_batched_tokens': 8192},
+            throughput=1500.0,
+            output_throughput=1200.0,
+            latency=50.0,
+            thermal_summary=None,
+            is_thermally_safe=True,
+            nsys_metrics=None,
+            duration=60.0
+        )
+        
+        updated = exporter.update_best_configs(success_result)
+        assert updated == True
+        assert exporter.best_aggressive.throughput == 1500.0
+        assert exporter.best_sustained.throughput == 1500.0
+        
+        # Verify the failed result was still recorded in all_results
+        assert len(exporter.all_results) == 2
+        assert exporter.all_results[0]['error'] == "CUDA out of memory"
+        assert exporter.all_results[0]['error_type'] == 'vram_oom'
+        assert exporter.all_results[0]['penalty'] == -100.0
+        
+        print("✅ test_server_config_exporter_skips_failed_benchmarks PASSED")
     finally:
         shutil.rmtree(temp_dir)
 
@@ -1586,6 +1853,20 @@ if __name__ == "__main__":
     test_benchmark_result_to_dict()
     test_benchmark_result_with_thermal_summary()
     
+    print("\n=== Error Classification Tests ===")
+    test_benchmark_error_type_enum()
+    test_classify_error_vram_oom()
+    test_classify_error_engine_init()
+    test_classify_error_cuda()
+    test_classify_error_timeout()
+    test_classify_error_invalid_config()
+    test_classify_error_none()
+    test_classify_error_unknown()
+    test_get_error_penalty()
+    test_benchmark_result_is_successful()
+    test_benchmark_result_with_error_type()
+    test_log_error_details()
+    
     print("\n=== ServerProfilingWorkerLocal Tests ===")
     test_server_profiling_worker_local_init()
     test_server_profiling_worker_local_parse_benchmark_output()
@@ -1598,6 +1879,7 @@ if __name__ == "__main__":
     print("\n=== ServerConfigExporter Tests ===")
     test_server_config_exporter_init()
     test_server_config_exporter_update_best_configs()
+    test_server_config_exporter_skips_failed_benchmarks()
     test_server_config_exporter_save_configs()
     test_server_config_exporter_generate_launch_scripts()
     

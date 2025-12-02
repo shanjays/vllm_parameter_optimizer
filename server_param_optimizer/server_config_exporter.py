@@ -17,11 +17,20 @@ Output files:
 
 import json
 import os
+import sys
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
-from .thermal_monitor import ThermalSummary
+# Add parent directory to path for script execution
+if __name__ == "__main__" or "." not in __name__:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Import with fallback for both module and script execution
+try:
+    from .thermal_monitor import ThermalSummary
+except ImportError:
+    from thermal_monitor import ThermalSummary
 
 
 @dataclass
@@ -114,6 +123,11 @@ class ServerConfigExporter:
             elif isinstance(result.thermal_summary, dict):
                 thermal_summary_dict = result.thermal_summary
         
+        # Extract error info for record
+        error = result.error if hasattr(result, 'error') else ''
+        error_type = result.error_type.value if hasattr(result, 'error_type') and result.error_type else 'none'
+        penalty = result.penalty if hasattr(result, 'penalty') else 0.0
+        
         # Record result
         result_record = {
             'config': result.config if hasattr(result, 'config') else {},
@@ -121,14 +135,25 @@ class ServerConfigExporter:
             'is_thermally_safe': result.is_thermally_safe if hasattr(result, 'is_thermally_safe') else False,
             'thermal_summary': thermal_summary_dict,
             'duration': result.duration if hasattr(result, 'duration') else 0.0,
-            'error': result.error if hasattr(result, 'error') else '',
+            'error': error,
+            'error_type': error_type,
+            'penalty': penalty,
             'timestamp': timestamp
         }
         self.all_results.append(result_record)
         
-        # Skip if benchmark failed
-        if hasattr(result, 'error') and result.error:
-            print(f"[ServerConfigExporter] Skipping failed benchmark: {result.error}")
+        # Skip failed benchmarks entirely - use is_successful if available, fallback to error check
+        is_successful = True
+        if hasattr(result, 'is_successful'):
+            is_successful = result.is_successful
+        elif hasattr(result, 'error') and result.error:
+            is_successful = False
+        elif hasattr(result, 'throughput') and result.throughput <= 0.0:
+            is_successful = False
+            
+        if not is_successful:
+            penalty_str = f" (penalty: {penalty})" if penalty != 0.0 else ""
+            print(f"[ServerConfigExporter] Skipping failed benchmark{penalty_str}")
             return False
         
         throughput = result.throughput if hasattr(result, 'throughput') else 0.0

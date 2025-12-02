@@ -10,17 +10,32 @@ Features:
 - Integrates with ThermalMonitor for temperature/power monitoring during benchmarks
 - Optionally runs nsys profiling for detailed GPU metrics
 - Parses benchmark output to extract throughput (tokens/sec)
+- Error classification and VRAM penalty detection for RL learning
 """
 
 import os
 import re
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field, asdict
+from enum import Enum
 from typing import Dict, List, Optional, Any
 
-from .thermal_monitor import ThermalMonitor, ThermalConfig, ThermalSummary, get_gpu_info
-from .nsys_metrics_extractor import NsysMetricsExtractor, NsysProfile, NsysMetrics
+# Add parent directory to path for script execution
+if __name__ == "__main__" or "." not in __name__:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Import with fallback for both module and script execution
+try:
+    from .thermal_monitor import ThermalMonitor, ThermalConfig, ThermalSummary, get_gpu_info
+except ImportError:
+    from thermal_monitor import ThermalMonitor, ThermalConfig, ThermalSummary, get_gpu_info
+
+try:
+    from .nsys_metrics_extractor import NsysMetricsExtractor, NsysProfile, NsysMetrics
+except ImportError:
+    from nsys_metrics_extractor import NsysMetricsExtractor, NsysProfile, NsysMetrics
 
 # Check if ray is available
 try:
@@ -28,6 +43,131 @@ try:
     RAY_AVAILABLE = True
 except ImportError:
     RAY_AVAILABLE = False
+
+
+class BenchmarkErrorType(Enum):
+    """Classification of benchmark errors for appropriate handling."""
+    NONE = "none"
+    VRAM_OOM = "vram_oom"  # Out of memory
+    CUDA_ERROR = "cuda_error"  # CUDA runtime error
+    ENGINE_INIT_FAILED = "engine_init_failed"  # vLLM engine failed to start
+    TIMEOUT = "timeout"  # Benchmark timed out
+    INVALID_CONFIG = "invalid_config"  # Invalid parameter combination
+    UNKNOWN = "unknown"  # Unknown error
+
+
+def classify_error(error_message: str) -> BenchmarkErrorType:
+    """Classify benchmark error for appropriate handling.
+    
+    Args:
+        error_message: The error message to classify
+        
+    Returns:
+        BenchmarkErrorType indicating the category of error
+    """
+    if not error_message:
+        return BenchmarkErrorType.NONE
+    
+    error_lower = error_message.lower()
+    
+    # VRAM/OOM errors
+    if any(phrase in error_lower for phrase in [
+        'out of memory', 'oom', 'cuda out of memory',
+        'allocat', 'memory', 'vram',
+        'torch.cuda.outofmemoryerror',
+        'cuda error: out of memory'
+    ]):
+        return BenchmarkErrorType.VRAM_OOM
+    
+    # Engine initialization failures (often VRAM related)
+    if any(phrase in error_lower for phrase in [
+        'engine core initialization failed',
+        'failed to initialize',
+        'runtimeerror: engine',
+        'failed core proc'
+    ]):
+        return BenchmarkErrorType.ENGINE_INIT_FAILED
+    
+    # CUDA errors
+    if any(phrase in error_lower for phrase in [
+        'cuda error', 'cudnn error', 'cublas error',
+        'cuda runtime error', 'device-side assert'
+    ]):
+        return BenchmarkErrorType.CUDA_ERROR
+    
+    # Timeout
+    if 'timeout' in error_lower or 'timed out' in error_lower:
+        return BenchmarkErrorType.TIMEOUT
+    
+    # Invalid config
+    if any(phrase in error_lower for phrase in [
+        'invalid', 'must be', 'should be', 'constraint',
+        'max_num_batched_tokens', 'max_num_seqs'
+    ]):
+        return BenchmarkErrorType.INVALID_CONFIG
+    
+    return BenchmarkErrorType.UNKNOWN
+
+
+def get_error_penalty(error_type: BenchmarkErrorType) -> float:
+    """Get throughput penalty for error type (negative reward for RL).
+    
+    Args:
+        error_type: The type of error that occurred
+        
+    Returns:
+        Negative float representing the penalty for this error type
+    """
+    penalties = {
+        BenchmarkErrorType.NONE: 0.0,
+        BenchmarkErrorType.VRAM_OOM: -100.0,  # Heavy penalty for OOM
+        BenchmarkErrorType.ENGINE_INIT_FAILED: -80.0,  # Often VRAM related
+        BenchmarkErrorType.CUDA_ERROR: -50.0,
+        BenchmarkErrorType.TIMEOUT: -30.0,  # Might be too aggressive config
+        BenchmarkErrorType.INVALID_CONFIG: -20.0,
+        BenchmarkErrorType.UNKNOWN: -10.0,
+    }
+    return penalties.get(error_type, -10.0)
+
+
+def log_error_details(error: str, config: Dict[str, Any]) -> None:
+    """Log detailed error information for debugging.
+    
+    Args:
+        error: The error message
+        config: The configuration that caused the error
+    """
+    error_type = classify_error(error)
+    penalty = get_error_penalty(error_type)
+    
+    print(f"\n{'='*60}")
+    print(f"[BENCHMARK ERROR] Configuration Failed")
+    print(f"{'='*60}")
+    print(f"Config: max_num_seqs={config.get('max_num_seqs')}, "
+          f"max_num_batched_tokens={config.get('max_num_batched_tokens')}")
+    print(f"Error Type: {error_type.value}")
+    print(f"Penalty: {penalty}")
+    print(f"\nFull Error:\n{error}")
+    
+    # Provide debugging hints
+    if error_type == BenchmarkErrorType.VRAM_OOM:
+        print(f"\n[DEBUG HINT] VRAM exceeded! Try reducing:")
+        print(f"  - max_num_seqs (current: {config.get('max_num_seqs')})")
+        print(f"  - max_num_batched_tokens (current: {config.get('max_num_batched_tokens')})")
+        print(f"  - For A100 40GB, try max_num_seqs <= 64, max_num_batched_tokens <= 16384")
+    elif error_type == BenchmarkErrorType.ENGINE_INIT_FAILED:
+        print(f"\n[DEBUG HINT] Engine init failed - likely VRAM or config issue")
+        print(f"  - Check if another process is using GPU memory")
+        print(f"  - Try smaller batch sizes")
+    elif error_type == BenchmarkErrorType.TIMEOUT:
+        print(f"\n[DEBUG HINT] Benchmark timed out")
+        print(f"  - Configuration may be too aggressive")
+        print(f"  - Try reducing max_num_seqs or max_num_batched_tokens")
+    elif error_type == BenchmarkErrorType.CUDA_ERROR:
+        print(f"\n[DEBUG HINT] CUDA error occurred")
+        print(f"  - Check GPU health and driver status")
+        print(f"  - Try restarting the GPU or reducing workload")
+    print(f"{'='*60}\n")
 
 
 @dataclass
@@ -42,6 +182,24 @@ class BenchmarkResult:
     nsys_metrics: Optional[Dict[str, Any]]  # Optional nsys profiling metrics
     duration: float  # Total benchmark duration in seconds
     error: str = ""  # Error message if benchmark failed
+    error_type: BenchmarkErrorType = BenchmarkErrorType.NONE  # Classified error type
+    penalty: float = 0.0  # Negative value for errors (for RL reward)
+    
+    @property
+    def is_successful(self) -> bool:
+        """Check if benchmark completed successfully."""
+        return self.error == "" and self.throughput > 0.0
+    
+    @property
+    def effective_throughput(self) -> float:
+        """Get throughput with penalty applied (for RL reward).
+        
+        Returns:
+            Throughput if successful, otherwise the negative penalty value
+        """
+        if self.is_successful:
+            return self.throughput
+        return self.penalty  # Return negative penalty
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert result to dictionary for JSON serialization."""
@@ -54,7 +212,11 @@ class BenchmarkResult:
             'is_thermally_safe': self.is_thermally_safe,
             'nsys_metrics': self.nsys_metrics,
             'duration': self.duration,
-            'error': self.error
+            'error': self.error,
+            'error_type': self.error_type.value if self.error_type else 'none',
+            'penalty': self.penalty,
+            'is_successful': self.is_successful,
+            'effective_throughput': self.effective_throughput
         }
 
 
@@ -248,6 +410,10 @@ def _create_worker_class():
                 print(f"[ServerProfilingWorker] Thermal: avg={thermal_summary.temp_avg:.1f}°C, "
                       f"max={thermal_summary.temp_max:.1f}°C, safe={is_thermally_safe}")
             
+            # Classify error and calculate penalty
+            error_type = classify_error(error)
+            penalty = get_error_penalty(error_type)
+            
             result = BenchmarkResult(
                 config=config,
                 throughput=throughput,
@@ -257,7 +423,9 @@ def _create_worker_class():
                 is_thermally_safe=is_thermally_safe,
                 nsys_metrics=nsys_metrics,
                 duration=duration,
-                error=error
+                error=error,
+                error_type=error_type,
+                penalty=penalty
             )
             
             self._last_result = result
@@ -484,6 +652,10 @@ class ServerProfilingWorkerLocal:
         thermal_summary = self.thermal_monitor.get_thermal_summary()
         is_thermally_safe = self.thermal_monitor.is_thermally_safe()
         
+        # Classify error and calculate penalty
+        error_type = classify_error(error)
+        penalty = get_error_penalty(error_type)
+        
         result = BenchmarkResult(
             config=config,
             throughput=throughput,
@@ -493,7 +665,9 @@ class ServerProfilingWorkerLocal:
             is_thermally_safe=is_thermally_safe,
             nsys_metrics=nsys_metrics,
             duration=duration,
-            error=error
+            error=error,
+            error_type=error_type,
+            penalty=penalty
         )
         
         self._last_result = result

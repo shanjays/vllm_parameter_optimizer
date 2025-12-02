@@ -94,6 +94,8 @@ class ServerFeedbackCollector:
         
         # Process results
         processed_results = []
+        failed_count = 0
+        
         for i, result in enumerate(results):
             # Handle both BenchmarkResult objects and dicts
             if hasattr(result, 'to_dict'):
@@ -107,20 +109,37 @@ class ServerFeedbackCollector:
             if i < len(configs):
                 result_dict['config'] = configs[i]
             
+            # Extract error information for RL learning
+            is_successful = result_dict.get('is_successful', True)
+            if not is_successful:
+                # If is_successful not explicitly set, check for error
+                if result_dict.get('error') or result_dict.get('throughput', 0.0) <= 0.0:
+                    is_successful = False
+            
+            result_dict['is_successful'] = is_successful
+            
+            # Track effective throughput for RL reward
+            if is_successful:
+                result_dict['effective_throughput'] = result_dict.get('throughput', 0.0)
+            else:
+                result_dict['effective_throughput'] = result_dict.get('penalty', -10.0)
+                failed_count += 1
+            
             processed_results.append(result_dict)
             
-            # Update best configs
-            throughput = result_dict.get('throughput', 0.0)
-            is_thermally_safe = result_dict.get('is_thermally_safe', False)
-            config = configs[i] if i < len(configs) else {}
-            
-            if throughput > self.best_aggressive_throughput:
-                self.best_aggressive_throughput = throughput
-                self.best_aggressive_config = config.copy()
-            
-            if is_thermally_safe and throughput > self.best_sustained_throughput:
-                self.best_sustained_throughput = throughput
-                self.best_sustained_config = config.copy()
+            # Update best configs (only for successful benchmarks)
+            if is_successful:
+                throughput = result_dict.get('throughput', 0.0)
+                is_thermally_safe = result_dict.get('is_thermally_safe', False)
+                config = configs[i] if i < len(configs) else {}
+                
+                if throughput > self.best_aggressive_throughput:
+                    self.best_aggressive_throughput = throughput
+                    self.best_aggressive_config = config.copy()
+                
+                if is_thermally_safe and throughput > self.best_sustained_throughput:
+                    self.best_sustained_throughput = throughput
+                    self.best_sustained_config = config.copy()
         
         # Create iteration feedback
         iteration = IterationFeedback(
@@ -136,7 +155,7 @@ class ServerFeedbackCollector:
         self.all_configs_tested.extend(configs)
         self.all_results.extend(processed_results)
         
-        print(f"[ServerFeedbackCollector] Iteration {iteration_num}: {len(configs)} configs tested")
+        print(f"[ServerFeedbackCollector] Iteration {iteration_num}: {len(configs)} configs tested ({failed_count} failed)")
         print(f"[ServerFeedbackCollector] Best aggressive: {self.best_aggressive_throughput:.2f} tokens/sec")
         print(f"[ServerFeedbackCollector] Best sustained: {self.best_sustained_throughput:.2f} tokens/sec")
         
@@ -214,12 +233,42 @@ class ServerFeedbackCollector:
         lines.append("PATTERNS OBSERVED:")
         self._add_pattern_observations(lines)
         
+        # Add failure summary for LLM to learn from
+        self._add_failure_summary(lines)
+        
         lines.append("")
         lines.append(f"YOUR GOAL: Find configs that exceed {self.best_aggressive_throughput:.2f} tokens/sec")
         lines.append("           while maintaining thermal safety (<75°C for A100)")
         lines.append("")
         
         return "\n".join(lines)
+    
+    def _add_failure_summary(self, lines: List[str]) -> None:
+        """Add summary of failed configurations for LLM learning."""
+        failed_configs = [
+            r for r in self.all_results 
+            if not r.get('is_successful', True) or r.get('error')
+        ]
+        
+        if not failed_configs:
+            return
+        
+        lines.append("")
+        lines.append(f"⚠️ FAILED CONFIGURATIONS ({len(failed_configs)} total):")
+        
+        # Show the last 5 failures
+        recent_failures = failed_configs[-5:]
+        for r in recent_failures:
+            config = r.get('config', {})
+            error_type = r.get('error_type', 'unknown')
+            penalty = r.get('penalty', -10.0)
+            lines.append(
+                f"  ❌ seqs={config.get('max_num_seqs', '?')}, "
+                f"tokens={config.get('max_num_batched_tokens', '?')} → "
+                f"{error_type} (penalty: {penalty})"
+            )
+        
+        lines.append("  → LLM should AVOID these parameter ranges!")
     
     def _add_pattern_observations(self, lines: List[str]) -> None:
         """Analyze results and add pattern observations."""
