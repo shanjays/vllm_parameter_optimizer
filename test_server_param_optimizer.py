@@ -2192,6 +2192,218 @@ def test_module_exports_gpu_utilities():
 
 
 # ============================================================
+# Enhanced Logging Tests
+# ============================================================
+
+def test_server_meta_controller_generate_configs_logging():
+    """Test that generate_configs prints feedback and validated configs."""
+    from server_param_optimizer.server_meta_controller import ServerMetaController
+    from server_param_optimizer.server_feedback_collector import ServerFeedbackCollector
+    import io
+    import sys
+    
+    controller = ServerMetaController()
+    
+    # Create a mock feedback collector with some data
+    temp_dir = tempfile.mkdtemp()
+    temp_file = os.path.join(temp_dir, "test_state.json")
+    try:
+        collector = ServerFeedbackCollector(state_file=temp_file)
+        
+        # Add some test data
+        configs = [{'max_num_seqs': 64, 'max_num_batched_tokens': 8192}]
+        results = [{'throughput': 1200.0, 'is_thermally_safe': True}]
+        collector.add_iteration(configs, results)
+        
+        # Capture stdout
+        captured_output = io.StringIO()
+        sys.stdout = captured_output
+        
+        try:
+            generated = controller.generate_configs(collector)
+        finally:
+            sys.stdout = sys.__stdout__
+        
+        output = captured_output.getvalue()
+        
+        # Verify feedback is printed
+        assert "FEEDBACK FOR LLM PROMPT" in output
+        assert "SERVER PARAMETER OPTIMIZATION FEEDBACK" in output
+        
+        # Verify validated configs are printed
+        assert "VALIDATED CONFIGURATIONS TO TEST" in output
+        assert "max_num_seqs" in output
+        assert "max_num_batched_tokens" in output
+        
+        # Verify default configs message is printed (since LLM is not available)
+        assert "Using DEFAULT configurations" in output or "LLM not available" in output
+        
+        print("✅ test_server_meta_controller_generate_configs_logging PASSED")
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_server_meta_controller_default_configs_logging():
+    """Test that default configs generation prints config details."""
+    from server_param_optimizer.server_meta_controller import ServerMetaController
+    import io
+    import sys
+    
+    controller = ServerMetaController()
+    
+    # Capture stdout
+    captured_output = io.StringIO()
+    sys.stdout = captured_output
+    
+    try:
+        configs = controller._generate_default_configs()
+    finally:
+        sys.stdout = sys.__stdout__
+    
+    output = captured_output.getvalue()
+    
+    # Verify default config logging
+    assert "Using DEFAULT configurations" in output
+    assert "aggressive_high" in output
+    assert "balanced" in output
+    assert "conservative" in output
+    assert "low_concurrency" in output
+    assert "seqs=128" in output  # aggressive config
+    assert "seqs=64" in output   # balanced config
+    
+    print("✅ test_server_meta_controller_default_configs_logging PASSED")
+
+
+def test_server_optimizer_iteration_feedback_logging():
+    """Test that _print_iteration_feedback prints detailed benchmark results."""
+    from server_param_optimizer.server_optimizer import ServerParameterOptimizer
+    from server_param_optimizer.server_profiling_worker import BenchmarkResult
+    from server_param_optimizer.thermal_monitor import ThermalSummary
+    import io
+    import sys
+    
+    temp_dir = tempfile.mkdtemp()
+    try:
+        # Capture stdout during init
+        captured_output = io.StringIO()
+        sys.stdout = captured_output
+        
+        optimizer = ServerParameterOptimizer(
+            output_dir=temp_dir,
+            benchmark_duration_minutes=1,
+            num_iterations=1
+        )
+        
+        sys.stdout = sys.__stdout__
+        
+        # Create mock configs and results
+        configs = [
+            {'max_num_seqs': 64, 'max_num_batched_tokens': 8192, 'name': 'test_config'}
+        ]
+        
+        thermal_summary = ThermalSummary(
+            duration_seconds=60.0,
+            sample_count=60,
+            temp_min=60.0,
+            temp_max=72.0,
+            temp_avg=68.0,
+            temp_final=70.0,
+            power_min=250.0,
+            power_max=350.0,
+            power_avg=300.0,
+            memory_max_used_mb=30000.0,
+            memory_max_used_pct=75.0,
+            gpu_util_avg=90.0,
+            memory_util_avg=60.0,
+            is_thermally_safe=True,
+            max_temp_exceeded=False,
+            throttling_detected=False,
+            time_above_target=0.0
+        )
+        
+        results = [
+            BenchmarkResult(
+                config=configs[0],
+                throughput=1500.0,
+                output_throughput=1200.0,
+                latency=50.0,
+                thermal_summary=thermal_summary,
+                is_thermally_safe=True,
+                nsys_metrics=None,
+                duration=60.0
+            )
+        ]
+        
+        # First update best configs
+        optimizer.config_exporter.update_best_configs(results[0])
+        
+        # Capture stdout
+        captured_output = io.StringIO()
+        sys.stdout = captured_output
+        
+        try:
+            optimizer._print_iteration_feedback(configs, results)
+        finally:
+            sys.stdout = sys.__stdout__
+        
+        output = captured_output.getvalue()
+        
+        # Verify feedback contains expected information
+        assert "Benchmark Results" in output
+        assert "test_config" in output
+        assert "max_num_seqs: 64" in output
+        assert "max_num_batched_tokens: 8192" in output
+        assert "Throughput: 1500.00" in output
+        assert "Thermal Data" in output
+        assert "Temperature:" in output
+        assert "Current Best Configurations" in output
+        assert "Best Aggressive" in output
+        
+        print("✅ test_server_optimizer_iteration_feedback_logging PASSED")
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_server_optimizer_benchmark_config_logging():
+    """Test that _benchmark_config prints detailed config info."""
+    from server_param_optimizer.server_optimizer import ServerParameterOptimizer
+    import io
+    import sys
+    
+    # Check that the code has the expected logging by inspecting the source
+    temp_dir = tempfile.mkdtemp()
+    try:
+        # Capture stdout during init
+        captured_output = io.StringIO()
+        sys.stdout = captured_output
+        
+        optimizer = ServerParameterOptimizer(
+            output_dir=temp_dir,
+            benchmark_duration_minutes=1,
+            num_iterations=1
+        )
+        
+        sys.stdout = sys.__stdout__
+        
+        # Verify the _benchmark_config method exists and has the logging code
+        import inspect
+        source = inspect.getsource(optimizer._benchmark_config)
+        
+        # Check that the source code contains the expected logging statements
+        assert "TESTING CONFIGURATION" in source
+        assert "Parameter Settings" in source
+        assert "--max-num-seqs" in source
+        assert "--max-num-batched-tokens" in source
+        assert "Rationale:" in source
+        assert "RESULTS:" in source
+        assert "Thermal Summary:" in source
+        
+        print("✅ test_server_optimizer_benchmark_config_logging PASSED")
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+# ============================================================
 # Main Test Runner
 # ============================================================
 
@@ -2328,6 +2540,12 @@ if __name__ == "__main__":
     test_server_optimizer_gpu_separation()
     test_server_optimizer_same_gpu_warning()
     test_module_exports_gpu_utilities()
+    
+    print("\n=== Enhanced Logging Tests ===")
+    test_server_meta_controller_generate_configs_logging()
+    test_server_meta_controller_default_configs_logging()
+    test_server_optimizer_iteration_feedback_logging()
+    test_server_optimizer_benchmark_config_logging()
     
     print("\n" + "="*60)
     print("✅ ALL SERVER PARAMETER OPTIMIZER TESTS PASSED")

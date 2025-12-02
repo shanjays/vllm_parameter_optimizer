@@ -77,6 +77,9 @@ BENCHMARK_DURATION_MINUTES = 20
 NUM_ITERATIONS = 8
 OUTPUT_DIR = "./server_optimization_results"
 
+# Logging separator width for consistent terminal output
+SEPARATOR_WIDTH = 70
+
 # GPU assignment (for multi-GPU systems)
 LLM_GPU_ID = 0        # GPU for LLM meta-controller
 BENCHMARK_GPU_ID = 1  # GPU for vLLM benchmarks
@@ -322,12 +325,12 @@ class ServerParameterOptimizer:
     
     def _print_header(self) -> None:
         """Print optimization header."""
-        print("\n" + "═" * 70)
+        print("\n" + "═" * SEPARATOR_WIDTH)
         print(f"Server Parameter Optimization for {self.model_name}")
         print(f"GPU: {self.gpu_type}")
         print(f"LLM GPU: {self.llm_gpu_id} | Benchmark GPU: {self.benchmark_gpu_id}")
         print(f"Benchmark Duration: {self.benchmark_duration_minutes} minutes per config")
-        print("═" * 70 + "\n")
+        print("═" * SEPARATOR_WIDTH + "\n")
     
     def run_optimization(self, num_iterations: Optional[int] = None) -> None:
         """Run the full optimization loop.
@@ -357,18 +360,33 @@ class ServerParameterOptimizer:
         """
         self.current_iteration = iteration_num
         
-        print(f"\n--- [ServerOptimizer] Iteration {iteration_num}/{self.num_iterations} ---")
+        print("\n" + "═" * SEPARATOR_WIDTH)
+        print(f"[ServerOptimizer] ITERATION {iteration_num}/{self.num_iterations}")
+        print("═" * SEPARATOR_WIDTH)
         
         # Generate configurations using LLM
-        print("[ServerOptimizer] LLM generating configurations...")
+        print("\n[ServerOptimizer] LLM generating configurations...")
         configs = self.meta_controller.generate_configs(self.feedback_collector)
         print(f"[ServerOptimizer] LLM suggested {len(configs)} configurations")
+        
+        # Print parameter configs being tested
+        print("\n" + "-" * SEPARATOR_WIDTH)
+        print("[ServerOptimizer] PARAMETER CONFIGS TO BE TESTED THIS ITERATION:")
+        print("-" * SEPARATOR_WIDTH)
+        for i, config in enumerate(configs, 1):
+            print(f"\n  Config {i}: {config.get('name', 'unnamed')}")
+            print(f"    max_num_seqs: {config.get('max_num_seqs')}")
+            print(f"    max_num_batched_tokens: {config.get('max_num_batched_tokens')}")
+            if config.get('rationale'):
+                print(f"    rationale: {config.get('rationale')}")
+        print("-" * SEPARATOR_WIDTH + "\n")
         
         # Benchmark each configuration
         iteration_configs = []
         iteration_results = []
         
-        for config in configs:
+        for idx, config in enumerate(configs, 1):
+            print(f"\n[ServerOptimizer] Testing config {idx}/{len(configs)}...")
             result = self._benchmark_config(config)
             iteration_configs.append({
                 'max_num_seqs': config.get('max_num_seqs'),
@@ -385,7 +403,12 @@ class ServerParameterOptimizer:
         # Update feedback collector
         self.feedback_collector.add_iteration(iteration_configs, iteration_results)
         
-        print(f"[ServerOptimizer] Iteration {iteration_num} complete")
+        # Print iteration summary with detailed feedback
+        print("\n" + "=" * SEPARATOR_WIDTH)
+        print(f"[ServerOptimizer] ITERATION {iteration_num} COMPLETE - FEEDBACK SUMMARY:")
+        print("=" * SEPARATOR_WIDTH)
+        self._print_iteration_feedback(iteration_configs, iteration_results)
+        print("=" * SEPARATOR_WIDTH + "\n")
     
     def _benchmark_config(self, config: Dict[str, Any]) -> BenchmarkResult:
         """Run benchmark for a single configuration.
@@ -400,7 +423,17 @@ class ServerParameterOptimizer:
         max_num_batched_tokens = config.get('max_num_batched_tokens', 8192)
         config_name = config.get('name', f'seqs{max_num_seqs}_tokens{max_num_batched_tokens}')
         
-        print(f"\n[ServerOptimizer] Testing: seqs={max_num_seqs}, tokens={max_num_batched_tokens}")
+        # Print detailed config info
+        print("\n" + "-" * 50)
+        print(f"[ServerOptimizer] TESTING CONFIGURATION: {config_name}")
+        print("-" * 50)
+        print(f"  Parameter Settings:")
+        print(f"    --max-num-seqs: {max_num_seqs}")
+        print(f"    --max-num-batched-tokens: {max_num_batched_tokens}")
+        if config.get('rationale'):
+            print(f"  Rationale: {config.get('rationale')}")
+        print("-" * 50)
+        
         print("[ThermalMonitor] Started monitoring (sampling every 1s)")
         
         # Run benchmark
@@ -419,20 +452,36 @@ class ServerParameterOptimizer:
                 duration_minutes=self.benchmark_duration_minutes
             )
         
-        # Print results with proper error handling
+        # Print detailed results
+        print("\n[Benchmark] RESULTS:")
+        print("-" * 40)
+        
         if result.error:
             # Log detailed error info for debugging
             log_error_details(result.error, result.config)
             print(f"[ServerOptimizer] ❌ Benchmark FAILED - penalty: {result.penalty}")
         else:
-            print(f"[Benchmark] Throughput: {result.throughput:.1f} tokens/sec")
+            print(f"  Throughput: {result.throughput:.1f} tokens/sec")
+            if result.output_throughput:
+                print(f"  Output Throughput: {result.output_throughput:.1f} tokens/sec")
+            if result.latency:
+                print(f"  Latency: {result.latency:.2f} ms")
             
             # Print thermal summary using helper function
             if result.thermal_summary:
                 temp_min = _get_thermal_value(result.thermal_summary, 'temp_min')
                 temp_max = _get_thermal_value(result.thermal_summary, 'temp_max')
                 temp_avg = _get_thermal_value(result.thermal_summary, 'temp_avg')
-                print(f"[ThermalMonitor] Temp: min={temp_min:.0f}°C, max={temp_max:.0f}°C, avg={temp_avg:.1f}°C")
+                power_avg = _get_thermal_value(result.thermal_summary, 'power_avg')
+                power_max = _get_thermal_value(result.thermal_summary, 'power_max')
+                gpu_util = _get_thermal_value(result.thermal_summary, 'gpu_util_avg')
+                mem_util = _get_thermal_value(result.thermal_summary, 'memory_util_avg')
+                
+                print(f"  Thermal Summary:")
+                print(f"    Temperature: min={temp_min:.1f}°C, max={temp_max:.1f}°C, avg={temp_avg:.1f}°C")
+                print(f"    Power: avg={power_avg:.1f}W, max={power_max:.1f}W")
+                print(f"    GPU Utilization: {gpu_util:.1f}%")
+                print(f"    Memory Utilization: {mem_util:.1f}%")
             
             # Save thermal plot (only for successful benchmarks)
             self._save_thermal_plot(config, result)
@@ -448,6 +497,8 @@ class ServerParameterOptimizer:
             
             if self._is_new_best_aggressive(result):
                 print("[ServerOptimizer] → New best AGGRESSIVE config!")
+        
+        print("-" * 40)
         
         return result
     
@@ -544,6 +595,76 @@ class ServerParameterOptimizer:
             return True
         return result.throughput > self.config_exporter.best_sustained.throughput
     
+    def _print_iteration_feedback(
+        self,
+        configs: List[Dict[str, Any]],
+        results: List[BenchmarkResult]
+    ) -> None:
+        """Print detailed feedback from benchmark results.
+        
+        Args:
+            configs: List of configurations tested
+            results: List of BenchmarkResult objects
+        """
+        print("\nBenchmark Results:")
+        print("-" * 60)
+        
+        for i, (config, result) in enumerate(zip(configs, results), 1):
+            config_name = config.get('name', 'unnamed')
+            max_num_seqs = config.get('max_num_seqs', 'N/A')
+            max_num_batched_tokens = config.get('max_num_batched_tokens', 'N/A')
+            
+            print(f"\n  [{i}] Config: {config_name}")
+            print(f"      Parameters:")
+            print(f"        max_num_seqs: {max_num_seqs}")
+            print(f"        max_num_batched_tokens: {max_num_batched_tokens}")
+            
+            if result.error:
+                print(f"      Status: ❌ FAILED")
+                print(f"      Error: {result.error}")
+                print(f"      Penalty: {result.penalty}")
+            else:
+                print(f"      Status: ✓ SUCCESS")
+                print(f"      Throughput: {result.throughput:.2f} tokens/sec")
+                if result.output_throughput:
+                    print(f"      Output Throughput: {result.output_throughput:.2f} tokens/sec")
+                
+                # Print thermal data
+                if result.thermal_summary:
+                    print(f"      Thermal Data:")
+                    temp_min = _get_thermal_value(result.thermal_summary, 'temp_min')
+                    temp_max = _get_thermal_value(result.thermal_summary, 'temp_max')
+                    temp_avg = _get_thermal_value(result.thermal_summary, 'temp_avg')
+                    power_avg = _get_thermal_value(result.thermal_summary, 'power_avg')
+                    gpu_util_avg = _get_thermal_value(result.thermal_summary, 'gpu_util_avg')
+                    
+                    print(f"        Temperature: min={temp_min:.1f}°C, max={temp_max:.1f}°C, avg={temp_avg:.1f}°C")
+                    print(f"        Power (avg): {power_avg:.1f}W")
+                    print(f"        GPU Utilization (avg): {gpu_util_avg:.1f}%")
+                    print(f"        Thermally Safe: {'Yes' if result.is_thermally_safe else 'No'}")
+        
+        # Print current best configurations
+        print("\n" + "-" * 60)
+        print("Current Best Configurations:")
+        
+        if self.config_exporter.best_aggressive:
+            ba = self.config_exporter.best_aggressive
+            print(f"\n  🚀 Best Aggressive (Max Throughput):")
+            print(f"      max_num_seqs: {ba.max_num_seqs}")
+            print(f"      max_num_batched_tokens: {ba.max_num_batched_tokens}")
+            print(f"      Throughput: {ba.throughput:.2f} tokens/sec")
+        else:
+            print("\n  🚀 Best Aggressive: Not yet found")
+        
+        if self.config_exporter.best_sustained:
+            bs = self.config_exporter.best_sustained
+            print(f"\n  🌡️  Best Sustained (Thermally Safe):")
+            print(f"      max_num_seqs: {bs.max_num_seqs}")
+            print(f"      max_num_batched_tokens: {bs.max_num_batched_tokens}")
+            print(f"      Throughput: {bs.throughput:.2f} tokens/sec")
+        else:
+            print("\n  🌡️  Best Sustained: Not yet found")
+    
     def _save_final_results(self) -> None:
         """Save all final configuration files."""
         print("\n[ServerOptimizer] Saving final results...")
@@ -577,9 +698,9 @@ class ServerParameterOptimizer:
         """Print comprehensive final summary."""
         duration = time.time() - self.start_time if self.start_time else 0
         
-        print("\n" + "═" * 70)
+        print("\n" + "═" * SEPARATOR_WIDTH)
         print("OPTIMIZATION COMPLETE - FINAL SUMMARY")
-        print("═" * 70)
+        print("═" * SEPARATOR_WIDTH)
         
         print(f"\nModel: {self.model_name}")
         print(f"GPU: {self.gpu_type}")
@@ -620,7 +741,7 @@ class ServerParameterOptimizer:
         print(f"📈 Full results saved to: {self.output_dir}/optimization_results.json")
         print(f"🚀 Launch scripts saved to: {self.output_dir}/launch_scripts/")
         
-        print("═" * 70 + "\n")
+        print("═" * SEPARATOR_WIDTH + "\n")
 
 
 def main():
@@ -641,9 +762,9 @@ def main():
     
     args = parser.parse_args()
     
-    print("\n" + "═" * 70)
+    print("\n" + "═" * SEPARATOR_WIDTH)
     print("          SERVER PARAMETER OPTIMIZER FOR VLLM")
-    print("═" * 70)
+    print("═" * SEPARATOR_WIDTH)
     
     optimizer = ServerParameterOptimizer(
         model_name=MODEL_NAME,
