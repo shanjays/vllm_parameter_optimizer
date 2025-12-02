@@ -12,6 +12,21 @@ DEFAULT_CONFIG = {
     "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4,
 }
 
+# Standard token counts that vLLM expects - DO NOT include 'default' key!
+# vLLM's get_moe_configs() does: {int(key): val for key, val in tuned_config.items()}
+# This fails if key = 'default' or any non-integer string
+STANDARD_TOKEN_COUNTS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 1536, 2048, 3072, 4096]
+
+# Default kernel configuration for vLLM config files
+VLLM_DEFAULT_KERNEL_CONFIG = {
+    "BLOCK_SIZE_M": 64,
+    "BLOCK_SIZE_N": 64,
+    "BLOCK_SIZE_K": 32,
+    "GROUP_SIZE_M": 8,
+    "num_warps": 8,
+    "num_stages": 4
+}
+
 # Aggressive penalty constants - crashes near limits are informative!
 PENALTY_CUDA_OOM = -20.0          # Was -100. OOM tells us we found the limit!
 PENALTY_SHARED_MEMORY = -25.0     # Was -50. Shared mem limit is useful info
@@ -383,15 +398,17 @@ class ProfilingWorker:
         config_filename = f"E={E},N={N},device_name=NVIDIA_H100_80GB_HBM3.json" 
         config_path = os.path.join(self.vllm_config_dir, config_filename)
         
-        vllm_config_data = { 
-            "16088": params_dict, 
-            "default": params_dict  
-        }
+        # Build vLLM-compatible config with ALL standard token counts
+        # DO NOT use 'default' key - vLLM's get_moe_configs() does:
+        #   {int(key): val for key, val in tuned_config.items()}
+        # which fails on 'default' with: ValueError: invalid literal for int()
+        vllm_config_data = self._prepare_vllm_config(params_dict)
         
         try:
             with open(config_path, "w") as f:
                 json.dump(vllm_config_data, f, indent=2)
             print(f"[ProfilingWorker] Wrote config to vLLM default path: {config_path}")
+            print(f"[ProfilingWorker] Config has {len(vllm_config_data)} token counts: {sorted([int(k) for k in vllm_config_data.keys()])[:10]}...")
         except Exception as e:
             print(f"[ProfilingWorker] ERROR: Failed to write vLLM config file. {e}")
             return 0.0
@@ -533,7 +550,13 @@ class ProfilingWorker:
         return 0.0
 
     def _validate_config_file(self, config_path: str) -> bool:
-        """Validate the config file before running benchmark."""
+        """Validate the config file before running benchmark.
+        
+        Validates that:
+        1. File exists and contains valid JSON
+        2. All keys are integer strings (vLLM requirement)
+        3. Each config entry has required kernel parameters
+        """
         if not os.path.exists(config_path):
             print(f"[ProfilingWorker] ERROR: Config file does not exist: {config_path}")
             return False
@@ -546,8 +569,22 @@ class ProfilingWorker:
                 print(f"[ProfilingWorker] ERROR: Config file is empty")
                 return False
             
+            # Check for invalid keys (non-integer strings like 'default')
+            # vLLM's get_moe_configs() does: {int(key): val for key, val in tuned_config.items()}
+            invalid_keys = []
+            for key in config.keys():
+                try:
+                    int(key)  # Verify key can be converted to int
+                except ValueError:
+                    invalid_keys.append(key)
+            
+            if invalid_keys:
+                print(f"[ProfilingWorker] ERROR: Config contains non-integer keys that vLLM cannot parse: {invalid_keys}")
+                print(f"[ProfilingWorker] vLLM requires all keys to be integer token counts (e.g., '1', '16', '128')")
+                return False
+            
             # Check that we have at least some token counts
-            print(f"[ProfilingWorker] Config has {len(config)} token counts: {list(config.keys())[:5]}...")
+            print(f"[ProfilingWorker] Config has {len(config)} token counts: {sorted([int(k) for k in config.keys()])[:5]}...")
             
             # Validate each config entry
             required_keys = ["BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "num_warps", "num_stages"]
@@ -637,6 +674,41 @@ class ProfilingWorker:
     def run_fast_gym_benchmark(self, params_dict, static_args, reward_weights, num_tokens=None):
         """Legacy method for backward compatibility."""
         return self.run_kernel_profiling(params_dict, static_args, reward_weights, num_tokens)
+
+    def _prepare_vllm_config(self, params_dict):
+        """
+        Prepare vLLM-compatible config with all standard token counts.
+        
+        vLLM's get_moe_configs() function does:
+            {int(key): val for key, val in tuned_config.items()}
+        This fails if any key is not an integer string (e.g., 'default').
+        
+        This method creates a config with ALL standard token counts as
+        integer string keys, using the provided params_dict for each.
+        
+        Args:
+            params_dict: Kernel configuration parameters to use
+            
+        Returns:
+            Dict with integer string keys for all standard token counts
+        """
+        # Start with default config and update with params_dict if provided
+        config_entry = VLLM_DEFAULT_KERNEL_CONFIG.copy()
+        if params_dict:
+            config_entry.update(params_dict)
+        
+        # Ensure all required keys are present
+        required_keys = ["BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "num_warps", "num_stages"]
+        for key in required_keys:
+            if key not in config_entry:
+                config_entry[key] = VLLM_DEFAULT_KERNEL_CONFIG.get(key, 64)
+        
+        # Build config with ALL standard token counts - NO 'default' key!
+        vllm_config = {}
+        for tc in STANDARD_TOKEN_COUNTS:
+            vllm_config[str(tc)] = config_entry.copy()
+        
+        return vllm_config
 
 
 # Backward compatibility alias

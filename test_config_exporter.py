@@ -441,6 +441,85 @@ def test_corrupt_config_file_creates_new():
         shutil.rmtree(temp_dir)
 
 
+def test_config_filters_default_key():
+    """Test that 'default' key is filtered out when loading existing config.
+    
+    vLLM's get_moe_configs() does: {int(key): val for key, val in tuned_config.items()}
+    This fails if key = 'default' with: ValueError: invalid literal for int()
+    """
+    temp_dir = tempfile.mkdtemp()
+    try:
+        # Create a config file with 'default' key (the problematic format)
+        vllm_configs_dir = os.path.join(temp_dir, "vllm_configs")
+        os.makedirs(vllm_configs_dir, exist_ok=True)
+        
+        config_filename = "E=128,N=768,device_name=NVIDIA_H100_80GB_HBM3.json"
+        config_path = os.path.join(vllm_configs_dir, config_filename)
+        
+        # This is the problematic format that caused the ValueError
+        bad_config = {
+            "16088": {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "num_warps": 8, "num_stages": 4},
+            "default": {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "num_warps": 8, "num_stages": 4}
+        }
+        with open(config_path, 'w') as f:
+            json.dump(bad_config, f)
+        
+        # Create exporter - it should filter out 'default' key
+        exporter = VLLMConfigExporter(num_experts=128, inter_size=768, output_dir=temp_dir)
+        
+        # Verify 'default' key is NOT in best_configs
+        assert "default" not in exporter.best_configs, "'default' key should be filtered out"
+        
+        # Verify the config file was cleaned up
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        assert "default" not in config, "'default' key should be removed from file"
+        
+        # Verify all keys are valid integer strings
+        for key in config.keys():
+            try:
+                int(key)
+            except ValueError:
+                raise AssertionError(f"Config contains non-integer key: {key}")
+        
+        # Verify it has all standard token counts
+        from config_exporter import TOKEN_COUNTS_ALL
+        assert len(config) == len(TOKEN_COUNTS_ALL), f"Should have all {len(TOKEN_COUNTS_ALL)} token counts"
+        
+        print("✅ test_config_filters_default_key PASSED")
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_all_config_keys_are_integer_strings():
+    """Test that saved config only contains integer string keys (vLLM requirement)."""
+    temp_dir = tempfile.mkdtemp()
+    try:
+        exporter = VLLMConfigExporter(num_experts=64, inter_size=512, output_dir=temp_dir)
+        
+        # Add some configs
+        for tc in [1, 16, 64, 256]:
+            exporter.update_best_config(tc, {"BLOCK_SIZE_M": 128}, reward=50.0)
+        
+        # Save and check
+        vllm_path = exporter.save_vllm_config(output_dir=temp_dir)
+        
+        with open(vllm_path, 'r') as f:
+            config = json.load(f)
+        
+        # Verify all keys are valid integer strings
+        for key in config.keys():
+            try:
+                int(key)
+            except ValueError:
+                raise AssertionError(f"Config contains non-integer key: {key}")
+        
+        print("✅ test_all_config_keys_are_integer_strings PASSED")
+    finally:
+        shutil.rmtree(temp_dir)
+
+
 if __name__ == "__main__":
     print("--- CONFIG EXPORTER TESTS ---\n")
     
@@ -473,6 +552,10 @@ if __name__ == "__main__":
     test_initialization_loads_existing_config()
     test_update_best_config_updates_file_immediately()
     test_corrupt_config_file_creates_new()
+    
+    print("\n=== vLLM Compatibility Tests ===")
+    test_config_filters_default_key()
+    test_all_config_keys_are_integer_strings()
     
     print("\n" + "="*60)
     print("✅ ALL CONFIG EXPORTER TESTS PASSED")
