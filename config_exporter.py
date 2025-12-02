@@ -116,37 +116,56 @@ class VLLMConfigExporter:
             return fallback_dir
     
     def _initialize_config_with_defaults(self):
-        """Create config file with default values for all token counts."""
+        """Create config file with default values for all token counts.
+        
+        If an existing config exists:
+        - Load it and filter out any non-integer keys (like 'default')
+        - Ensure all standard token counts have entries
+        
+        vLLM's get_moe_configs() does: {int(key): val for key, val in tuned_config.items()}
+        This fails if any key is not an integer string.
+        """
         config_path = os.path.join(self.vllm_config_dir, self.config_filename)
         
         # Check if config already exists
+        existing_config = {}
         if os.path.exists(config_path):
             try:
                 with open(config_path, 'r') as f:
-                    existing_config = json.load(f)
-                # Load existing best configs and rewards
-                # Use float('-inf') as sentinel for untested configs
-                for tc_str, config in existing_config.items():
-                    self.best_configs[tc_str] = config
-                    self.best_rewards[tc_str] = float('-inf')
-                print(f"[ConfigExporter] Loaded existing config with {len(existing_config)} token counts from {config_path}")
-                return
+                    raw_config = json.load(f)
+                
+                # Filter out invalid keys (like 'default') that vLLM can't parse
+                for tc_str, config in raw_config.items():
+                    try:
+                        int(tc_str)  # Validate key is an integer string
+                        existing_config[tc_str] = config
+                    except ValueError:
+                        print(f"[ConfigExporter] Skipping invalid key '{tc_str}' - vLLM requires integer token counts")
+                
+                if existing_config:
+                    print(f"[ConfigExporter] Loaded existing config with {len(existing_config)} valid token counts from {config_path}")
+                
             except (json.JSONDecodeError, ValueError) as e:
                 print(f"[ConfigExporter] Could not parse existing config: {e}, creating new")
         
-        # Create default config for all token counts
-        # Use float('-inf') as sentinel for untested configs
+        # Build complete config with all token counts
+        # Use existing values where available, defaults otherwise
         default_config = {}
         for tc in TOKEN_COUNTS_ALL:
-            default_config[str(tc)] = self.DEFAULT_KERNEL_CONFIG.copy()
-            self.best_configs[str(tc)] = self.DEFAULT_KERNEL_CONFIG.copy()
-            self.best_rewards[str(tc)] = float('-inf')
+            tc_str = str(tc)
+            if tc_str in existing_config:
+                default_config[tc_str] = existing_config[tc_str]
+                self.best_configs[tc_str] = existing_config[tc_str]
+            else:
+                default_config[tc_str] = self.DEFAULT_KERNEL_CONFIG.copy()
+                self.best_configs[tc_str] = self.DEFAULT_KERNEL_CONFIG.copy()
+            self.best_rewards[tc_str] = float('-inf')
         
         # Write to vLLM config directory
         try:
             with open(config_path, 'w') as f:
                 json.dump(default_config, f, indent=2)
-            print(f"[ConfigExporter] Initialized config with defaults at {config_path}")
+            print(f"[ConfigExporter] Initialized config with {len(default_config)} token counts at {config_path}")
         except OSError as e:
             print(f"[ConfigExporter] Could not write to vLLM dir: {e}")
             # Fallback to local directory
@@ -164,14 +183,26 @@ class VLLMConfigExporter:
             print(f"[ConfigExporter] Warning: Could not write local backup: {e}")
     
     def _update_config_file(self, token_count: int, config: Dict[str, int]):
-        """Update the config file with new best config for a token count."""
+        """Update the config file with new best config for a token count.
+        
+        Also filters out any invalid keys (like 'default') to ensure
+        vLLM compatibility.
+        """
         config_path = os.path.join(self.vllm_config_dir, self.config_filename)
         
         # Load existing config
         try:
             if os.path.exists(config_path):
                 with open(config_path, 'r') as f:
-                    full_config = json.load(f)
+                    raw_config = json.load(f)
+                # Filter out invalid keys
+                full_config = {}
+                for key, value in raw_config.items():
+                    try:
+                        int(key)  # Validate key is an integer string
+                        full_config[key] = value
+                    except ValueError:
+                        pass  # Skip invalid keys like 'default'
             else:
                 full_config = {}
         except (json.JSONDecodeError, ValueError):
@@ -192,7 +223,15 @@ class VLLMConfigExporter:
         try:
             if os.path.exists(local_path):
                 with open(local_path, 'r') as f:
-                    local_config = json.load(f)
+                    raw_local = json.load(f)
+                # Filter out invalid keys
+                local_config = {}
+                for key, value in raw_local.items():
+                    try:
+                        int(key)
+                        local_config[key] = value
+                    except ValueError:
+                        pass
             else:
                 local_config = {}
             local_config[str(token_count)] = config
