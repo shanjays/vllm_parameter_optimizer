@@ -1194,6 +1194,60 @@ def test_get_physical_gpu_id_empty_cuda_visible_devices():
     print("✅ test_get_physical_gpu_id_empty_cuda_visible_devices PASSED")
 
 
+def test_get_physical_gpu_id_negative_index():
+    """Test get_physical_gpu_id handles negative indices gracefully."""
+    from server_param_optimizer.server_profiling_worker import get_physical_gpu_id
+    import os
+    import io
+    import sys
+    
+    # Save original value
+    original = os.environ.get("CUDA_VISIBLE_DEVICES")
+    
+    try:
+        # Test with no CUDA_VISIBLE_DEVICES (should return "0")
+        if "CUDA_VISIBLE_DEVICES" in os.environ:
+            del os.environ["CUDA_VISIBLE_DEVICES"]
+        
+        # Capture warning output
+        captured_output = io.StringIO()
+        sys.stdout = captured_output
+        
+        result = get_physical_gpu_id(-1)
+        
+        sys.stdout = sys.__stdout__
+        output = captured_output.getvalue()
+        
+        # Should warn and default to 0
+        assert result == "0"
+        assert "[WARNING]" in output
+        assert "negative" in output.lower()
+        
+        # Test with CUDA_VISIBLE_DEVICES set
+        os.environ["CUDA_VISIBLE_DEVICES"] = "5,6"
+        
+        captured_output = io.StringIO()
+        sys.stdout = captured_output
+        
+        result = get_physical_gpu_id(-2)
+        
+        sys.stdout = sys.__stdout__
+        output = captured_output.getvalue()
+        
+        # Should warn and map 0 -> "5"
+        assert result == "5"
+        assert "[WARNING]" in output
+    finally:
+        sys.stdout = sys.__stdout__
+        # Restore original value
+        if original is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = original
+        elif "CUDA_VISIBLE_DEVICES" in os.environ:
+            del os.environ["CUDA_VISIBLE_DEVICES"]
+    
+    print("✅ test_get_physical_gpu_id_negative_index PASSED")
+
+
 # ============================================================
 # ServerProfilingWorkerLocal Tests
 # ============================================================
@@ -2221,6 +2275,7 @@ if __name__ == "__main__":
     test_get_physical_gpu_id_with_spaces()
     test_get_physical_gpu_id_out_of_range()
     test_get_physical_gpu_id_empty_cuda_visible_devices()
+    test_get_physical_gpu_id_negative_index()
     
     print("\n=== ServerProfilingWorkerLocal Tests ===")
     test_server_profiling_worker_local_init()

@@ -64,6 +64,11 @@ def get_physical_gpu_id(visible_index: int) -> str:
     Returns:
         String representation of the physical GPU ID to use
     """
+    # Validate non-negative index early
+    if visible_index < 0:
+        print(f"[WARNING] Invalid negative GPU index {visible_index}. Using 0.")
+        visible_index = 0
+    
     parent_cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     
     if not parent_cuda_devices:
@@ -77,7 +82,7 @@ def get_physical_gpu_id(visible_index: int) -> str:
         # Empty or invalid CUDA_VISIBLE_DEVICES, use index directly
         return str(visible_index)
     
-    if visible_index < 0 or visible_index >= len(gpu_list):
+    if visible_index >= len(gpu_list):
         # Index out of range, log warning and use index directly
         print(f"[WARNING] GPU index {visible_index} out of range for "
               f"CUDA_VISIBLE_DEVICES={parent_cuda_devices}. Using index directly.")
