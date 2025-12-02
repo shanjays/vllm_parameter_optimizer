@@ -1041,6 +1041,160 @@ def test_is_benchmark_successful():
 
 
 # ============================================================
+# GPU ID Mapping Tests (CUDA_VISIBLE_DEVICES handling)
+# ============================================================
+
+def test_get_physical_gpu_id_no_cuda_visible_devices():
+    """Test get_physical_gpu_id when CUDA_VISIBLE_DEVICES is not set."""
+    from server_param_optimizer.server_profiling_worker import get_physical_gpu_id
+    import os
+    
+    # Save original value
+    original = os.environ.get("CUDA_VISIBLE_DEVICES")
+    
+    try:
+        # Remove CUDA_VISIBLE_DEVICES
+        if "CUDA_VISIBLE_DEVICES" in os.environ:
+            del os.environ["CUDA_VISIBLE_DEVICES"]
+        
+        # Should return the index directly as a string
+        assert get_physical_gpu_id(0) == "0"
+        assert get_physical_gpu_id(1) == "1"
+        assert get_physical_gpu_id(5) == "5"
+    finally:
+        # Restore original value
+        if original is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = original
+        elif "CUDA_VISIBLE_DEVICES" in os.environ:
+            del os.environ["CUDA_VISIBLE_DEVICES"]
+    
+    print("✅ test_get_physical_gpu_id_no_cuda_visible_devices PASSED")
+
+
+def test_get_physical_gpu_id_with_cuda_visible_devices():
+    """Test get_physical_gpu_id when CUDA_VISIBLE_DEVICES is set in parent."""
+    from server_param_optimizer.server_profiling_worker import get_physical_gpu_id
+    import os
+    
+    # Save original value
+    original = os.environ.get("CUDA_VISIBLE_DEVICES")
+    
+    try:
+        # Set CUDA_VISIBLE_DEVICES to a specific list
+        os.environ["CUDA_VISIBLE_DEVICES"] = "5,6"
+        
+        # Should map visible index to physical GPU
+        assert get_physical_gpu_id(0) == "5"
+        assert get_physical_gpu_id(1) == "6"
+        
+        # Test with different configuration
+        os.environ["CUDA_VISIBLE_DEVICES"] = "2,3,7"
+        assert get_physical_gpu_id(0) == "2"
+        assert get_physical_gpu_id(1) == "3"
+        assert get_physical_gpu_id(2) == "7"
+        
+        # Test single GPU
+        os.environ["CUDA_VISIBLE_DEVICES"] = "4"
+        assert get_physical_gpu_id(0) == "4"
+    finally:
+        # Restore original value
+        if original is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = original
+        elif "CUDA_VISIBLE_DEVICES" in os.environ:
+            del os.environ["CUDA_VISIBLE_DEVICES"]
+    
+    print("✅ test_get_physical_gpu_id_with_cuda_visible_devices PASSED")
+
+
+def test_get_physical_gpu_id_with_spaces():
+    """Test get_physical_gpu_id handles spaces in CUDA_VISIBLE_DEVICES."""
+    from server_param_optimizer.server_profiling_worker import get_physical_gpu_id
+    import os
+    
+    # Save original value
+    original = os.environ.get("CUDA_VISIBLE_DEVICES")
+    
+    try:
+        # Test with spaces
+        os.environ["CUDA_VISIBLE_DEVICES"] = " 5 , 6 , 7 "
+        assert get_physical_gpu_id(0) == "5"
+        assert get_physical_gpu_id(1) == "6"
+        assert get_physical_gpu_id(2) == "7"
+    finally:
+        # Restore original value
+        if original is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = original
+        elif "CUDA_VISIBLE_DEVICES" in os.environ:
+            del os.environ["CUDA_VISIBLE_DEVICES"]
+    
+    print("✅ test_get_physical_gpu_id_with_spaces PASSED")
+
+
+def test_get_physical_gpu_id_out_of_range():
+    """Test get_physical_gpu_id when index is out of range."""
+    from server_param_optimizer.server_profiling_worker import get_physical_gpu_id
+    import os
+    import io
+    import sys
+    
+    # Save original value
+    original = os.environ.get("CUDA_VISIBLE_DEVICES")
+    
+    try:
+        os.environ["CUDA_VISIBLE_DEVICES"] = "5,6"
+        
+        # Capture warning output
+        captured_output = io.StringIO()
+        sys.stdout = captured_output
+        
+        # Index out of range should return the index directly with a warning
+        result = get_physical_gpu_id(3)
+        
+        sys.stdout = sys.__stdout__
+        output = captured_output.getvalue()
+        
+        assert result == "3"
+        assert "[WARNING]" in output
+        assert "out of range" in output
+    finally:
+        sys.stdout = sys.__stdout__
+        # Restore original value
+        if original is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = original
+        elif "CUDA_VISIBLE_DEVICES" in os.environ:
+            del os.environ["CUDA_VISIBLE_DEVICES"]
+    
+    print("✅ test_get_physical_gpu_id_out_of_range PASSED")
+
+
+def test_get_physical_gpu_id_empty_cuda_visible_devices():
+    """Test get_physical_gpu_id when CUDA_VISIBLE_DEVICES is empty."""
+    from server_param_optimizer.server_profiling_worker import get_physical_gpu_id
+    import os
+    
+    # Save original value
+    original = os.environ.get("CUDA_VISIBLE_DEVICES")
+    
+    try:
+        # Empty string
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        assert get_physical_gpu_id(0) == "0"
+        assert get_physical_gpu_id(1) == "1"
+        
+        # Just whitespace
+        os.environ["CUDA_VISIBLE_DEVICES"] = "   "
+        assert get_physical_gpu_id(0) == "0"
+    finally:
+        # Restore original value
+        if original is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = original
+        elif "CUDA_VISIBLE_DEVICES" in os.environ:
+            del os.environ["CUDA_VISIBLE_DEVICES"]
+    
+    print("✅ test_get_physical_gpu_id_empty_cuda_visible_devices PASSED")
+
+
+# ============================================================
 # ServerProfilingWorkerLocal Tests
 # ============================================================
 
@@ -2060,6 +2214,13 @@ if __name__ == "__main__":
     test_benchmark_result_with_error_type()
     test_log_error_details()
     test_is_benchmark_successful()
+    
+    print("\n=== GPU ID Mapping Tests ===")
+    test_get_physical_gpu_id_no_cuda_visible_devices()
+    test_get_physical_gpu_id_with_cuda_visible_devices()
+    test_get_physical_gpu_id_with_spaces()
+    test_get_physical_gpu_id_out_of_range()
+    test_get_physical_gpu_id_empty_cuda_visible_devices()
     
     print("\n=== ServerProfilingWorkerLocal Tests ===")
     test_server_profiling_worker_local_init()

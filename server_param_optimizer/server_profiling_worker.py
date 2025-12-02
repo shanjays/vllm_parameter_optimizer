@@ -45,6 +45,49 @@ except ImportError:
     RAY_AVAILABLE = False
 
 
+def get_physical_gpu_id(visible_index: int) -> str:
+    """Map a visible GPU index to the physical GPU ID.
+    
+    When CUDA_VISIBLE_DEVICES is set in the parent process (e.g., "5,6"),
+    the gpu_id parameter represents a visible index (0 or 1), not the physical
+    GPU ID. This function returns the physical GPU ID that should be passed
+    to subprocess CUDA_VISIBLE_DEVICES.
+    
+    For example:
+    - Parent has CUDA_VISIBLE_DEVICES="5,6", gpu_id=0 -> returns "5"
+    - Parent has CUDA_VISIBLE_DEVICES="5,6", gpu_id=1 -> returns "6"
+    - Parent has no CUDA_VISIBLE_DEVICES, gpu_id=1 -> returns "1"
+    
+    Args:
+        visible_index: The visible GPU index (0, 1, 2, etc.)
+        
+    Returns:
+        String representation of the physical GPU ID to use
+    """
+    parent_cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    
+    if not parent_cuda_devices:
+        # No CUDA_VISIBLE_DEVICES set, use the index directly
+        return str(visible_index)
+    
+    # Parse the parent's CUDA_VISIBLE_DEVICES list
+    gpu_list = [g.strip() for g in parent_cuda_devices.split(",") if g.strip()]
+    
+    if not gpu_list:
+        # Empty or invalid CUDA_VISIBLE_DEVICES, use index directly
+        return str(visible_index)
+    
+    if visible_index < 0 or visible_index >= len(gpu_list):
+        # Index out of range, log warning and use index directly
+        print(f"[WARNING] GPU index {visible_index} out of range for "
+              f"CUDA_VISIBLE_DEVICES={parent_cuda_devices}. Using index directly.")
+        return str(visible_index)
+    
+    # Map visible index to physical GPU ID
+    physical_gpu = gpu_list[visible_index]
+    return physical_gpu
+
+
 class BenchmarkErrorType(Enum):
     """Classification of benchmark errors for appropriate handling."""
     NONE = "none"
@@ -371,7 +414,7 @@ def _create_worker_class():
             
             # Set up environment
             env = os.environ.copy()
-            env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
+            env["CUDA_VISIBLE_DEVICES"] = get_physical_gpu_id(self.gpu_id)
             
             # Start thermal monitoring
             self.thermal_monitor.start_monitoring()
@@ -629,7 +672,7 @@ class ServerProfilingWorkerLocal:
         )
         
         env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
+        env["CUDA_VISIBLE_DEVICES"] = get_physical_gpu_id(self.gpu_id)
         
         self.thermal_monitor.start_monitoring()
         
