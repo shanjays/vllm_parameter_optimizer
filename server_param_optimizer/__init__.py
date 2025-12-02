@@ -20,6 +20,7 @@ from .server_profiling_worker import (
     get_error_penalty,
     log_error_details,
     is_benchmark_successful,
+    get_physical_gpu_id,
     RAY_AVAILABLE
 )
 from .server_config_exporter import ServerConfigExporter, ServerConfig
@@ -55,6 +56,7 @@ __all__ = [
     'get_error_penalty',
     'log_error_details',
     'is_benchmark_successful',
+    'get_physical_gpu_id',
     'RAY_AVAILABLE',
     # Config exporter (PR 2)
     'ServerConfigExporter',
