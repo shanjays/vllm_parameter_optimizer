@@ -1,11 +1,11 @@
 """
-Tests for MetaController PPO model persistence functionality.
+Tests for MetaController direct profiling functionality.
 
 Tests the following features:
 1. training_logger parameter in __init__
-2. _run_exploration_phase passes load_existing=True to ExplorationAgent
-3. _run_exploration_phase tracks best configs from environment
-4. _run_exploration_phase saves best model when reward improves
+2. _run_exploration_phase uses direct profiling instead of PPO
+3. _run_exploration_phase tracks best configs
+4. _generate_configs_from_search_space generates representative configs
 
 Note: These tests verify the changes by parsing the meta_controller.py source code
 directly, following the pattern used in test_training_fixes.py to avoid heavy 
@@ -78,78 +78,75 @@ def test_training_logger_stored_in_init():
         return False
 
 
-def test_exploration_agent_load_existing_true():
-    """Test that ExplorationAgent is created with load_existing=True."""
-    print("\n=== Test: ExplorationAgent created with load_existing=True ===")
+def test_no_exploration_agent_import():
+    """Test that ExplorationAgent is NOT imported (removed PPO)."""
+    print("\n=== Test: ExplorationAgent NOT imported (PPO removed) ===")
     
     source = get_meta_controller_source()
     
-    # Find the _run_exploration_phase method and check for load_existing=True
-    # Looking for: ExplorationAgent(..., load_existing=True, ...)
-    pattern = r'ExplorationAgent\s*\([^)]*load_existing\s*=\s*True[^)]*\)'
-    match = re.search(pattern, source, re.DOTALL)
-    
-    if match:
-        print(f"✅ ExplorationAgent is created with load_existing=True")
-        return True
-    else:
-        print(f"❌ ExplorationAgent is NOT created with load_existing=True")
-        return False
-
-
-def test_exploration_agent_receives_training_logger():
-    """Test that ExplorationAgent receives training_logger from controller."""
-    print("\n=== Test: ExplorationAgent receives training_logger ===")
-    
-    source = get_meta_controller_source()
-    
-    # Check for training_logger parameter being passed to ExplorationAgent
-    # Looking for: ExplorationAgent(..., training_logger=..., ...)
-    pattern = r'ExplorationAgent\s*\([^)]*training_logger\s*=[^)]*\)'
-    match = re.search(pattern, source, re.DOTALL)
-    
-    if match:
-        print(f"✅ ExplorationAgent receives training_logger parameter")
-        return True
-    else:
-        print(f"❌ ExplorationAgent does NOT receive training_logger parameter")
-        return False
-
-
-def test_persistent_log_dir_format():
-    """Test that log_dir uses persistent format without timestamp."""
-    print("\n=== Test: log_dir uses persistent format ===")
-    
-    source = get_meta_controller_source()
-    
-    # Check that the new log_dir format is used: ./logs/exploration_agent/tokens_{token_count}/
-    # This should NOT have a timestamp pattern like: exploration_{timestamp}_tokens
-    persistent_pattern = r'log_dir\s*=\s*f["\']\.?/?logs/exploration_agent/tokens_'
-    match = re.search(persistent_pattern, source)
-    
-    if match:
-        print(f"✅ log_dir uses persistent format without timestamp")
-        return True
-    else:
-        print(f"❌ log_dir does NOT use persistent format")
-        return False
-
-
-def test_save_best_if_improved_called():
-    """Test that save_best_if_improved is called in _run_exploration_phase."""
-    print("\n=== Test: save_best_if_improved is called ===")
-    
-    source = get_meta_controller_source()
-    
-    # Check for agent.save_best_if_improved call in _run_exploration_phase
-    pattern = r'agent\.save_best_if_improved\s*\('
+    # Check that ExplorationAgent is NOT imported
+    pattern = r'from exploration_agent import ExplorationAgent'
     match = re.search(pattern, source)
     
     if match:
-        print(f"✅ save_best_if_improved is called")
+        print(f"❌ ExplorationAgent is still imported (PPO not removed)")
+        return False
+    else:
+        print(f"✅ ExplorationAgent is NOT imported (PPO removed)")
+        return True
+
+
+def test_no_kernel_tuning_env_import():
+    """Test that KernelTuningEnvironment is NOT imported (removed PPO)."""
+    print("\n=== Test: KernelTuningEnvironment NOT imported (PPO removed) ===")
+    
+    source = get_meta_controller_source()
+    
+    # Check that KernelTuningEnvironment is NOT imported
+    pattern = r'from kernel_tuning_env import KernelTuningEnvironment'
+    match = re.search(pattern, source)
+    
+    if match:
+        print(f"❌ KernelTuningEnvironment is still imported (PPO not removed)")
+        return False
+    else:
+        print(f"✅ KernelTuningEnvironment is NOT imported (PPO removed)")
+        return True
+
+
+def test_direct_profiling_in_exploration_phase():
+    """Test that _run_exploration_phase uses direct profiling."""
+    print("\n=== Test: _run_exploration_phase uses direct profiling ===")
+    
+    source = get_meta_controller_source()
+    
+    # Check for worker.run_kernel_profiling call in _run_exploration_phase
+    pattern = r'self\.worker\.run_kernel_profiling\.remote\s*\('
+    match = re.search(pattern, source)
+    
+    if match:
+        print(f"✅ _run_exploration_phase uses direct profiling via worker.run_kernel_profiling")
         return True
     else:
-        print(f"❌ save_best_if_improved is NOT called")
+        print(f"❌ _run_exploration_phase does NOT use direct profiling")
+        return False
+
+
+def test_generate_configs_method_exists():
+    """Test that _generate_configs_from_search_space method exists."""
+    print("\n=== Test: _generate_configs_from_search_space method exists ===")
+    
+    source = get_meta_controller_source()
+    
+    # Check for the method definition
+    pattern = r'def _generate_configs_from_search_space\s*\('
+    match = re.search(pattern, source)
+    
+    if match:
+        print(f"✅ _generate_configs_from_search_space method exists")
+        return True
+    else:
+        print(f"❌ _generate_configs_from_search_space method NOT found")
         return False
 
 
@@ -311,32 +308,51 @@ def test_exploration_phase_returns_best_configs():
         return False
 
 
+def test_shared_memory_validation():
+    """Test that shared memory validation is done for configs."""
+    print("\n=== Test: shared_memory validation in config generation ===")
+    
+    source = get_meta_controller_source()
+    
+    # Check for shared memory calculation
+    pattern = r'shared_mem\s*=\s*\(m\s*\*\s*k'
+    match = re.search(pattern, source)
+    
+    if match:
+        print(f"✅ Shared memory validation is present in config generation")
+        return True
+    else:
+        print(f"❌ Shared memory validation NOT found in config generation")
+        return False
+
+
 if __name__ == "__main__":
-    print("--- META CONTROLLER LOAD EXISTING TESTS ---")
+    print("--- META CONTROLLER DIRECT PROFILING TESTS ---")
     
     all_passed = True
     
     all_passed &= test_training_logger_parameter_in_init()
     all_passed &= test_training_logger_default_none()
     all_passed &= test_training_logger_stored_in_init()
-    all_passed &= test_exploration_agent_load_existing_true()
-    all_passed &= test_exploration_agent_receives_training_logger()
-    all_passed &= test_persistent_log_dir_format()
-    all_passed &= test_save_best_if_improved_called()
+    all_passed &= test_no_exploration_agent_import()
+    all_passed &= test_no_kernel_tuning_env_import()
+    all_passed &= test_direct_profiling_in_exploration_phase()
+    all_passed &= test_generate_configs_method_exists()
     all_passed &= test_best_configs_tracked()
     all_passed &= test_config_exporter_updated()
     all_passed &= test_backward_compatibility_init_signature()
     
-    # New tests for feedback_collector
+    # Tests for feedback_collector
     all_passed &= test_feedback_collector_parameter_in_init()
     all_passed &= test_feedback_collector_defaults_none()
     all_passed &= test_feedback_collector_stored_in_init()
     all_passed &= test_feedback_collector_record_policy_result()
     all_passed &= test_exploration_phase_returns_best_configs()
+    all_passed &= test_shared_memory_validation()
     
     print("\n" + "="*60)
     if all_passed:
-        print("✅ ALL META CONTROLLER LOAD EXISTING TESTS PASSED")
+        print("✅ ALL META CONTROLLER DIRECT PROFILING TESTS PASSED")
     else:
         print("❌ ONE OR MORE TESTS FAILED")
     print("="*60)
