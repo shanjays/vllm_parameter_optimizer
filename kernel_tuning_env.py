@@ -4,6 +4,20 @@ import numpy as np
 import json
 import ray
 
+# DEPRECATION NOTICE:
+# This module is deprecated in favor of DirectLLMOptimizer.
+# The PPO-based exploration approach (which uses this environment) has been
+# replaced with direct LLM configuration generation for faster optimization.
+#
+# The direct LLM approach generates specific kernel configurations directly
+# from the LLM output, bypassing the need for a Gymnasium environment.
+#
+# To use the new approach, use DirectLLMOptimizer from direct_llm_optimizer.py:
+#   from direct_llm_optimizer import DirectLLMOptimizer, build_direct_optimization_prompt
+#
+# This module is kept for backward compatibility with existing training pipelines
+# that use the PPO exploration approach.
+
 class KernelTuningEnvironment(gym.Env):
     """
     Kernel Tuning Environment for configuration optimization.

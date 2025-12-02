@@ -1,10 +1,22 @@
 import csv
 import os
 import torch
+import warnings
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
 from stable_baselines3.common.callbacks import BaseCallback
 from typing import Optional, Callable, Any, Dict
+
+# DEPRECATION NOTICE:
+# This module is deprecated in favor of DirectLLMOptimizer.
+# The PPO-based exploration approach has been replaced with direct LLM
+# configuration generation for faster optimization (5x-10x speedup).
+#
+# To use the new approach, use DirectLLMOptimizer from direct_llm_optimizer.py:
+#   from direct_llm_optimizer import DirectLLMOptimizer, build_direct_optimization_prompt
+#
+# This module is kept for backward compatibility with existing training pipelines
+# that use the PPO exploration approach.
 
 
 class TrainingCallback(BaseCallback):
