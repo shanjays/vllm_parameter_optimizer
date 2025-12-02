@@ -1334,6 +1334,196 @@ def test_new_module_imports():
 
 
 # ============================================================
+# ServerMetaController Tests
+# ============================================================
+
+def test_server_meta_controller_init():
+    """Test ServerMetaController initialization."""
+    from server_param_optimizer.server_meta_controller import ServerMetaController
+    
+    controller = ServerMetaController()
+    
+    assert controller.model_name is not None
+    assert controller.device is not None
+    assert controller._initialized == False
+    
+    print("✅ test_server_meta_controller_init PASSED")
+
+
+def test_server_meta_controller_get_param_space():
+    """Test ServerMetaController get_param_space method."""
+    from server_param_optimizer.server_meta_controller import ServerMetaController, PARAM_SPACE
+    
+    controller = ServerMetaController()
+    
+    param_space = controller.get_param_space()
+    
+    assert 'max_num_seqs' in param_space
+    assert 'max_num_batched_tokens' in param_space
+    assert param_space == PARAM_SPACE
+    
+    print("✅ test_server_meta_controller_get_param_space PASSED")
+
+
+def test_server_meta_controller_validate_config():
+    """Test ServerMetaController config validation."""
+    from server_param_optimizer.server_meta_controller import ServerMetaController
+    
+    controller = ServerMetaController()
+    
+    # Valid config
+    valid_config = {
+        'max_num_seqs': 64,
+        'max_num_batched_tokens': 16384
+    }
+    assert controller._validate_config(valid_config) == True
+    
+    # Invalid config - violates constraint (tokens < seqs * 128)
+    invalid_config = {
+        'max_num_seqs': 256,
+        'max_num_batched_tokens': 2048  # 2048 < 256 * 128 = 32768
+    }
+    assert controller._validate_config(invalid_config) == False
+    
+    # Missing required fields
+    missing_config = {'max_num_seqs': 64}
+    assert controller._validate_config(missing_config) == False
+    
+    # Not a dict
+    assert controller._validate_config("not a dict") == False
+    
+    print("✅ test_server_meta_controller_validate_config PASSED")
+
+
+def test_server_meta_controller_generate_default_configs():
+    """Test ServerMetaController default config generation."""
+    from server_param_optimizer.server_meta_controller import ServerMetaController
+    
+    controller = ServerMetaController()
+    
+    configs = controller._generate_default_configs()
+    
+    assert isinstance(configs, list)
+    assert len(configs) >= 2  # At least aggressive and conservative
+    
+    # Check all configs have required fields
+    for config in configs:
+        assert 'max_num_seqs' in config
+        assert 'max_num_batched_tokens' in config
+        assert 'name' in config
+        # Check values are valid
+        assert controller._validate_config(config)
+    
+    print("✅ test_server_meta_controller_generate_default_configs PASSED")
+
+
+def test_server_meta_controller_parse_configs():
+    """Test ServerMetaController JSON parsing."""
+    from server_param_optimizer.server_meta_controller import ServerMetaController
+    
+    controller = ServerMetaController()
+    
+    # Valid JSON with <param> tags
+    valid_output = '''
+<param>
+{
+  "configs": [
+    {
+      "name": "test_config",
+      "max_num_seqs": 128,
+      "max_num_batched_tokens": 32768,
+      "rationale": "Test config"
+    }
+  ]
+}
+</param>
+'''
+    configs = controller._parse_configs(valid_output)
+    assert len(configs) == 1
+    assert configs[0]['name'] == 'test_config'
+    assert configs[0]['max_num_seqs'] == 128
+    
+    # JSON without tags (fallback)
+    json_only = '{"configs": [{"name": "test", "max_num_seqs": 64, "max_num_batched_tokens": 8192}]}'
+    configs = controller._parse_configs(json_only)
+    assert len(configs) == 1
+    
+    # Invalid output
+    invalid_output = "no json here"
+    configs = controller._parse_configs(invalid_output)
+    assert configs == []
+    
+    print("✅ test_server_meta_controller_parse_configs PASSED")
+
+
+def test_server_meta_controller_build_prompt():
+    """Test ServerMetaController prompt building."""
+    from server_param_optimizer.server_meta_controller import ServerMetaController
+    
+    controller = ServerMetaController()
+    
+    feedback_str = "Previous iteration: seqs=64, tokens=8192 -> 1500 tokens/sec"
+    prompt = controller._build_prompt(feedback_str)
+    
+    assert "meta-llama/Llama-3.1-8B-Instruct" in prompt
+    assert "NVIDIA A100 40GB" in prompt
+    assert "max-num-seqs" in prompt
+    assert "max-num-batched-tokens" in prompt
+    assert feedback_str in prompt
+    assert "<param>" in prompt
+    
+    print("✅ test_server_meta_controller_build_prompt PASSED")
+
+
+# ============================================================
+# ServerParameterOptimizer Tests
+# ============================================================
+
+def test_server_optimizer_init():
+    """Test ServerParameterOptimizer initialization."""
+    from server_param_optimizer.server_optimizer import ServerParameterOptimizer
+    
+    temp_dir = tempfile.mkdtemp()
+    try:
+        optimizer = ServerParameterOptimizer(
+            output_dir=temp_dir,
+            benchmark_duration_minutes=1,
+            num_iterations=1
+        )
+        
+        assert optimizer.model_name is not None
+        assert optimizer.gpu_type is not None
+        assert optimizer.benchmark_duration_minutes == 1
+        assert optimizer.num_iterations == 1
+        assert optimizer.meta_controller is not None
+        assert optimizer.worker is not None
+        assert optimizer.config_exporter is not None
+        assert optimizer.feedback_collector is not None
+        assert optimizer.visualizer is not None
+        
+        print("✅ test_server_optimizer_init PASSED")
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_server_optimizer_module_import():
+    """Test that ServerParameterOptimizer is exported correctly."""
+    from server_param_optimizer import (
+        ServerParameterOptimizer,
+        ServerMetaController,
+        PARAM_SPACE
+    )
+    
+    assert ServerParameterOptimizer is not None
+    assert ServerMetaController is not None
+    assert PARAM_SPACE is not None
+    assert 'max_num_seqs' in PARAM_SPACE
+    assert 'max_num_batched_tokens' in PARAM_SPACE
+    
+    print("✅ test_server_optimizer_module_import PASSED")
+
+
+# ============================================================
 # Main Test Runner
 # ============================================================
 
@@ -1425,6 +1615,18 @@ if __name__ == "__main__":
     
     print("\n=== New Module Import Tests ===")
     test_new_module_imports()
+    
+    print("\n=== ServerMetaController Tests ===")
+    test_server_meta_controller_init()
+    test_server_meta_controller_get_param_space()
+    test_server_meta_controller_validate_config()
+    test_server_meta_controller_generate_default_configs()
+    test_server_meta_controller_parse_configs()
+    test_server_meta_controller_build_prompt()
+    
+    print("\n=== ServerParameterOptimizer Tests ===")
+    test_server_optimizer_init()
+    test_server_optimizer_module_import()
     
     print("\n" + "="*60)
     print("✅ ALL SERVER PARAMETER OPTIMIZER TESTS PASSED")

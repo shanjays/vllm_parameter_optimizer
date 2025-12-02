@@ -19,29 +19,35 @@ from .server_profiling_worker import (
 )
 from .server_config_exporter import ServerConfigExporter, ServerConfig
 from .server_feedback_collector import ServerFeedbackCollector, IterationFeedback
+from .server_meta_controller import ServerMetaController, PARAM_SPACE
+from .server_optimizer import ServerParameterOptimizer
 
 __all__ = [
-    # Thermal monitoring
+    # Thermal monitoring (PR 1)
     'ThermalMonitor',
     'ThermalSample',
     'ThermalConfig',
     'get_gpu_info',
-    # Visualization
+    # Visualization (PR 1)
     'ThermalVisualizer',
     'PlotConfig',
-    # Nsys profiling
+    # Nsys profiling (PR 1)
     'NsysMetricsExtractor',
     'NsysProfile',
     'check_nsys_available',
-    # Server profiling worker
+    # Server profiling worker (PR 2)
     'ServerProfilingWorker',
     'ServerProfilingWorkerLocal',
     'BenchmarkResult',
     'RAY_AVAILABLE',
-    # Config exporter
+    # Config exporter (PR 2)
     'ServerConfigExporter',
     'ServerConfig',
-    # Feedback collector
+    # Feedback collector (PR 2)
     'ServerFeedbackCollector',
     'IterationFeedback',
+    # Main optimizer (PR 3)
+    'ServerMetaController',
+    'PARAM_SPACE',
+    'ServerParameterOptimizer',
 ]
