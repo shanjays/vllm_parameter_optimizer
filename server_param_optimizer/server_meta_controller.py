@@ -5,7 +5,7 @@ Uses gpt-oss-20b LLM with LoRA adapters to generate server parameter configurati
 Generates --max-num-seqs and --max-num-batched-tokens configurations
 based on feedback from previous optimization iterations.
 
-Target: NVIDIA A100 40GB with meta-llama/Llama-3.1-8B-Instruct
+Target: NVIDIA H100 80GB with meta-llama/Llama-3.1-8B-Instruct
 """
 
 import json
@@ -35,12 +35,12 @@ META_CONTROLLER_MODEL = "openai/gpt-oss-20b"
 MAX_SEQ_LENGTH = 4096
 MAX_COMPLETION_LENGTH = 1024
 
-# A100 40GB thermal configuration
+# H100 80GB thermal configuration
 GPU_CONFIG = {
-    'name': 'NVIDIA A100 40GB',
-    'memory_gb': 40,
-    'tdp_watts': 400,
-    'max_safe_temp': 83,
+    'name': 'NVIDIA H100 80GB',
+    'memory_gb': 80,
+    'tdp_watts': 350,
+    'max_safe_temp': 85,
     'target_sustained_temp': 75,
 }
 
@@ -213,10 +213,10 @@ class ServerMetaController:
 ═══════════════════════════════════════════════════════════════════════════════
 
 MODEL: meta-llama/Llama-3.1-8B-Instruct
-GPU: NVIDIA A100 40GB
-  - Memory: 40 GB HBM2e
-  - TDP: 400W
-  - Max Safe Temp: 83°C (throttling)
+GPU: NVIDIA H100 80GB
+  - Memory: 80 GB HBM3
+  - TDP: 350W
+  - Max Safe Temp: 85°C (throttling)
   - Target Sustained Temp: 75°C
 
 ═══════════════════════════════════════════════════════════════════════════════

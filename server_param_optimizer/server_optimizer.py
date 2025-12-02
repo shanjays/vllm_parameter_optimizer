@@ -5,7 +5,7 @@ Main optimization script for vLLM server parameters.
 Coordinates all components (LLM, profiling worker, config exporter, feedback collector, visualizer)
 to find optimal --max-num-seqs and --max-num-batched-tokens configurations.
 
-Target: NVIDIA A100 40GB with meta-llama/Llama-3.1-8B-Instruct
+Target: NVIDIA H100 80GB with meta-llama/Llama-3.1-8B-Instruct
 Benchmark Duration: 20 minutes per configuration
 """
 
@@ -72,7 +72,7 @@ if RAY_AVAILABLE:
 
 # Default configuration
 MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
-GPU_TYPE = "NVIDIA A100 40GB"
+GPU_TYPE = "NVIDIA H100 80GB"
 BENCHMARK_DURATION_MINUTES = 20
 NUM_ITERATIONS = 8
 OUTPUT_DIR = "./server_optimization_results"
@@ -81,13 +81,13 @@ OUTPUT_DIR = "./server_optimization_results"
 LLM_GPU_ID = 0        # GPU for LLM meta-controller
 BENCHMARK_GPU_ID = 1  # GPU for vLLM benchmarks
 
-# Thermal thresholds for A100 40GB
+# Thermal thresholds for H100 80GB
 THERMAL_CONFIG = ThermalConfig(
-    max_safe_temp=83.0,
+    max_safe_temp=85.0,
     target_sustained_temp=75.0,
     warning_temp=80.0,
-    max_power=400.0,
-    total_memory_gb=40.0,
+    max_power=350.0,
+    total_memory_gb=80.0,
     gpu_name=GPU_TYPE
 )
 

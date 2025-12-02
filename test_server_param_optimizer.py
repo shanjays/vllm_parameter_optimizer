@@ -98,15 +98,15 @@ def test_thermal_sample_to_dict():
 # ============================================================
 
 def test_thermal_config_defaults():
-    """Test ThermalConfig has correct A100 40GB defaults."""
+    """Test ThermalConfig has correct H100 80GB defaults."""
     config = ThermalConfig()
     
-    assert config.max_safe_temp == 83.0
+    assert config.max_safe_temp == 85.0
     assert config.target_sustained_temp == 75.0
     assert config.warning_temp == 80.0
-    assert config.max_power == 400.0
-    assert config.total_memory_gb == 40.0
-    assert "A100" in config.gpu_name
+    assert config.max_power == 350.0
+    assert config.total_memory_gb == 80.0
+    assert "H100" in config.gpu_name
     
     print("✅ test_thermal_config_defaults PASSED")
 
@@ -149,7 +149,7 @@ def test_thermal_monitor_init():
     
     assert monitor.gpu_index == 0
     assert monitor.sample_interval == 1.0
-    assert monitor.config.max_safe_temp == 83.0
+    assert monitor.config.max_safe_temp == 85.0
     assert monitor._monitoring == False
     assert len(monitor._samples) == 0
     
@@ -1790,7 +1790,7 @@ def test_server_meta_controller_build_prompt():
     prompt = controller._build_prompt(feedback_str)
     
     assert "meta-llama/Llama-3.1-8B-Instruct" in prompt
-    assert "NVIDIA A100 40GB" in prompt
+    assert "NVIDIA H100 80GB" in prompt
     assert "max-num-seqs" in prompt
     assert "max-num-batched-tokens" in prompt
     assert feedback_str in prompt

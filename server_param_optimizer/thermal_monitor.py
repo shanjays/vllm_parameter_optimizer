@@ -5,7 +5,7 @@ Provides real-time GPU thermal and power monitoring via nvidia-smi.
 Used during benchmarks to track thermal behavior and determine if
 a configuration is thermally safe for sustained operation.
 
-Target: NVIDIA A100 40GB GPU
+Target: NVIDIA H100 80GB GPU
 """
 
 import subprocess
@@ -34,21 +34,21 @@ class ThermalSample:
 
 @dataclass
 class ThermalConfig:
-    """Configuration thresholds for A100 40GB GPU.
+    """Configuration thresholds for H100 80GB GPU.
     
-    These values are based on NVIDIA A100 specifications:
-    - Max operating temp: 83°C
-    - Throttle temp: 83°C (GPU starts throttling)
+    These values are based on NVIDIA H100 specifications:
+    - Max operating temp: 85°C
+    - Throttle temp: 85°C (GPU starts throttling)
     - Target sustained temp: 75°C (recommended for 24/7 operation)
-    - TDP: 400W
-    - Memory: 40GB HBM2e
+    - TDP: 350W (H100 PCIe) / 700W (H100 SXM5)
+    - Memory: 80GB HBM3
     """
-    max_safe_temp: float = 83.0  # Celsius - throttling threshold
+    max_safe_temp: float = 85.0  # Celsius - throttling threshold
     target_sustained_temp: float = 75.0  # Celsius - target for sustained operation
     warning_temp: float = 80.0  # Celsius - warning threshold
-    max_power: float = 400.0  # Watts - TDP
-    total_memory_gb: float = 40.0  # GB - total GPU memory
-    gpu_name: str = "NVIDIA A100 40GB"
+    max_power: float = 350.0  # Watts - TDP (H100 PCIe)
+    total_memory_gb: float = 80.0  # GB - total GPU memory
+    gpu_name: str = "NVIDIA H100 80GB"
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary."""
@@ -160,7 +160,7 @@ class ThermalMonitor:
         Args:
             gpu_index: GPU device index to monitor
             sample_interval: Time between samples in seconds
-            config: Thermal thresholds config (defaults to A100 40GB settings)
+            config: Thermal thresholds config (defaults to H100 80GB settings)
         """
         self.gpu_index = gpu_index
         self.sample_interval = sample_interval
@@ -278,7 +278,7 @@ class ThermalMonitor:
         ) * self.sample_interval
         
         # Thermal status flags
-        # On A100, throttling occurs at max_safe_temp (83°C)
+        # On H100, throttling occurs at max_safe_temp (85°C)
         max_temp_exceeded = temp_max >= self.config.max_safe_temp
         # Throttling detected when any sample reached the throttle threshold
         throttling_detected = max_temp_exceeded
@@ -309,7 +309,7 @@ class ThermalMonitor:
         """Check if the run stayed below target sustained temperature.
         
         Returns:
-            True if all samples were below target_sustained_temp (75°C for A100)
+            True if all samples were below target_sustained_temp (75°C for H100)
         """
         summary = self.get_thermal_summary()
         return summary.is_thermally_safe if summary else True

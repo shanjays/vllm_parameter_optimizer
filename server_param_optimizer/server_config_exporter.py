@@ -57,7 +57,7 @@ class ServerConfig:
 
 # Default target configuration
 DEFAULT_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
-DEFAULT_GPU = "NVIDIA A100 40GB"
+DEFAULT_GPU = "NVIDIA H100 80GB"
 
 
 class ServerConfigExporter:
