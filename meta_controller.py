@@ -5,14 +5,12 @@ import time
 import os
 import re
 import ast
-from kernel_tuning_env import KernelTuningEnvironment
-from exploration_agent import ExplorationAgent
 from profiling_worker import ProfilingWorker
 from config_exporter import TOKEN_COUNTS_ALL
 
 POWER_OF_TWO_WARPS = (2, 4, 8, 16, 32)
 
-# Default optimization policy with multiple options for PPO exploration
+# Default optimization policy with multiple options for direct profiling
 DEFAULT_OPTIMIZATION_POLICY = {
     "objective_weights": {
         "R_sm_throughput": 0.4,
@@ -41,11 +39,8 @@ TOKEN_COUNTS_TRAINING = [1, 16, 64, 256, 1024, 4096, 16384]
 # Default token counts to test (matching vLLM's expected format)
 DEFAULT_TOKEN_COUNTS = TOKEN_COUNTS_TRAINING
 
-# Minimum training steps per token count to ensure meaningful exploration
-MIN_STEPS_PER_TOKEN = 8  # Reduced from 10 for faster iteration
-
-# Number of top results to collect per token count
-RESULTS_PER_TOKEN = 3
+# Maximum configurations to test per exploration phase (to limit profiling time)
+MAX_CONFIGS_PER_PHASE = 20
 
 # Validation frequency: run vLLM validation after every N token counts
 VALIDATE_EVERY_N_TOKENS = 3
@@ -56,12 +51,12 @@ class MetaControllerReward:
     
     This class orchestrates the hierarchical optimization process by:
     1. Parsing optimization policies from LLM outputs
-    2. Running exploration phases using PPO agents
+    2. Running direct profiling of configurations (no PPO)
     3. Validating configurations through throughput benchmarks
     4. Computing rewards to guide the meta-learning process
     
     The reward function bridges the high-level policy generation (LLM)
-    with the low-level configuration exploration (PPO agent).
+    with direct configuration profiling for faster optimization.
     """
     def __init__(self, user_goal, model_name, exploration_steps, profiling_gpu_id, static_args, 
                  config_exporter=None, token_counts=None, training_logger=None, feedback_collector=None):
@@ -609,7 +604,7 @@ class MetaControllerReward:
             ss[key] = list(set(ss[key])) or ([64] if "BLOCK" in key else [4])
         
         # AFTER coercing all values, ensure minimum combinations
-        MIN_COMBINATIONS = 8  # Need at least 8 for meaningful PPO exploration
+        MIN_COMBINATIONS = 8  # Need at least 8 for meaningful exploration
         MIN_VALUES_PER_DIM = 2  # Each dimension needs at least 2 values
         
         # Default values to expand narrow search spaces
@@ -651,7 +646,11 @@ class MetaControllerReward:
         return self._validate_and_coerce_policy(plan)
 
     def _run_exploration_phase(self, policy_config_path):
-        """Run exploration phase for EACH token count.
+        """Run direct profiling phase for EACH token count (no PPO).
+        
+        This method replaces PPO-based exploration with direct profiling of
+        configurations generated from the search space. This is faster and
+        provides more direct feedback for the meta-controller.
         
         Returns:
             Tuple of (top_configs, best_configs) where:
@@ -659,91 +658,164 @@ class MetaControllerReward:
             - best_configs: Dict mapping token_count -> {config, reward}
         """
         all_top_results = []
-        best_configs_for_validation = []
         best_configs = {}
         total_tokens = len(self.token_counts)
         
-        # Calculate steps per token count
-        steps_per_token = max(MIN_STEPS_PER_TOKEN, self.exploration_steps // len(self.token_counts))
+        # Load the policy to get search space
+        try:
+            with open(policy_config_path, 'r') as f:
+                policy = json.load(f)
+        except Exception as e:
+            print(f"[MetaController] ERROR: Failed to load policy: {e}")
+            policy = DEFAULT_OPTIMIZATION_POLICY
+        
+        # Get objective weights and search space from policy
+        objective_weights = policy.get('objective_weights', DEFAULT_OPTIMIZATION_POLICY['objective_weights'])
+        search_space = policy.get('search_space', DEFAULT_OPTIMIZATION_POLICY['search_space'])
+        
+        # Generate configs from search space (sample representative combinations)
+        configs = self._generate_configs_from_search_space(search_space)
+        print(f"[MetaController] Generated {len(configs)} configurations to test")
         
         for i, token_count in enumerate(self.token_counts):
             print(f"\n[MetaController] === Token Count {i+1}/{total_tokens}: {token_count} tokens ===")
             
-            env = KernelTuningEnvironment(
-                policy_config_path=policy_config_path,
-                profiling_worker=self.worker,
-                static_args=self.static_args,
-                initial_state=self.initial_state,
-                config_exporter=self.config_exporter,
-                current_token_count=token_count
-            )
-            # Use persistent log_dir for each token count (not timestamped)
-            log_dir = f"./logs/exploration_agent/tokens_{token_count}/"
-            prev_cuda = os.environ.get("CUDA_VISIBLE_DEVICES")
+            best_reward_for_token = float('-inf')
+            best_config_for_token = None
             
-            # Hide GPUs for SB3 MLP – force CPU
-            os.environ["CUDA_VISIBLE_DEVICES"] = "" 
-            agent = None
-            try:
-                # Create agent WITH loading existing model - THIS IS THE FIX!
-                agent = ExplorationAgent(
-                    env, 
-                    log_dir=log_dir, 
-                    device="cpu",
-                    load_existing=True,  # Load trained model if exists!
-                    training_logger=self.training_logger,
-                )
-                agent.train_epoch(steps=steps_per_token)
-                top = env.get_top_results(n=RESULTS_PER_TOKEN)
-                print(f"[MetaController] Token count {token_count}: Found {len(top)} results.")
-                all_top_results.extend(top)
-                best_configs_for_validation.extend(top)
+            for config_idx, config in enumerate(configs):
+                print(f"[MetaController] Testing config {config_idx+1}/{len(configs)} for {token_count} tokens...")
                 
-                # Get best config from environment and save best model if improved
-                if top:
-                    best_result = max(top, key=lambda x: x[2])
-                    best_config = best_result[0]
-                    best_reward = best_result[2]
+                try:
+                    # Profile directly - NO PPO
+                    result_id = self.worker.run_kernel_profiling.remote(
+                        config,
+                        self.static_args,
+                        objective_weights,
+                        token_count
+                    )
+                    state, reward, csv_data = ray.get(result_id)
                     
-                    best_configs[token_count] = {
-                        'config': best_config,
-                        'reward': best_reward,
-                    }
+                    if state is not None:
+                        metrics = {
+                            'sm_throughput': float(state[0]),
+                            'dram_throughput': float(state[1]),
+                            'l1_hit_rate': float(state[2]),
+                            'l2_hit_rate': float(state[3])
+                        }
+                    else:
+                        metrics = None
+                        if reward is None:
+                            reward = -20.0
                     
-                    # Save best model if this is the best reward so far
-                    agent.save_best_if_improved(best_reward)
+                    # Store result
+                    all_top_results.append((config.copy(), state, reward))
                     
-                    # Update config exporter
-                    if self.config_exporter:
-                        self.config_exporter.update_best_config(
-                            token_count=token_count,
-                            config=best_config,
-                            reward=best_reward,
-                        )
-            finally:
-                if agent:
-                    try: agent.close()
-                    except Exception: pass
-                env.close()
-                if prev_cuda is None:
-                    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-                else:
-                    os.environ["CUDA_VISIBLE_DEVICES"] = prev_cuda
+                    # Update best for this token count
+                    if reward > best_reward_for_token:
+                        best_reward_for_token = reward
+                        best_config_for_token = config.copy()
+                        print(f"[MetaController] Token {token_count}: reward={reward:.2f} (new best)")
+                    else:
+                        print(f"[MetaController] Token {token_count}: reward={reward:.2f}")
+                    
+                except Exception as e:
+                    print(f"[MetaController] ERROR profiling config: {e}")
+                    all_top_results.append((config.copy(), self.initial_state, -20.0))
+            
+            # Save best config for this token count
+            if best_config_for_token is not None:
+                best_configs[token_count] = {
+                    'config': best_config_for_token,
+                    'reward': best_reward_for_token,
+                }
+                
+                # Update config exporter
+                if self.config_exporter:
+                    self.config_exporter.update_best_config(
+                        token_count=token_count,
+                        config=best_config_for_token,
+                        reward=best_reward_for_token,
+                    )
             
             # Periodic validation
-            if (i + 1) % VALIDATE_EVERY_N_TOKENS == 0 and best_configs_for_validation:
+            if (i + 1) % VALIDATE_EVERY_N_TOKENS == 0 and best_configs:
                 print(f"[MetaController] Running periodic throughput validation after {i+1} token counts...")
-                best_config = max(best_configs_for_validation, key=lambda x: x[2])
-                throughput = self._run_throughput_validation([best_config])
+                # Get best config so far
+                best_tc = max(best_configs.keys(), key=lambda tc: best_configs[tc].get('reward', 0))
+                best_overall = best_configs[best_tc]
+                top_config = [(best_overall['config'], None, best_overall['reward'])]
+                throughput = self._run_throughput_validation(top_config)
                 print(f"[MetaController] Periodic validation throughput: {throughput} tokens/sec")
-                best_configs_for_validation = []
         
         # Return combined top results from all token counts along with best_configs
         if all_top_results:
             sorted_results = sorted(all_top_results, key=lambda x: x[2], reverse=True)
-            print(f"[MetaController] Exploration phase completed. Total {len(all_top_results)} results across {len(self.token_counts)} token counts.")
+            print(f"[MetaController] Direct profiling completed. Total {len(all_top_results)} results across {len(self.token_counts)} token counts.")
             return sorted_results[:5], best_configs
         return [], best_configs
+    
+    def _generate_configs_from_search_space(self, search_space):
+        """Generate representative configs from search space.
+        
+        Instead of exploring all combinations (which PPO does slowly),
+        generate a set of representative configurations to test directly.
+        
+        Args:
+            search_space: Dict with parameter options
+            
+        Returns:
+            List of config dicts to test
+        """
+        configs = []
+        
+        # Get parameter values
+        m_values = search_space.get('BLOCK_SIZE_M', [64, 128])
+        n_values = search_space.get('BLOCK_SIZE_N', [64, 128])
+        k_values = search_space.get('BLOCK_SIZE_K', [32, 64])
+        warp_values = search_space.get('num_warps', [8, 16])
+        stage_values = search_space.get('num_stages', [3, 4, 5])
+        
+        # Generate all combinations up to a reasonable limit
+        from itertools import product
+        all_combos = list(product(m_values, n_values, k_values, warp_values, stage_values))
+        
+        # Limit to max 20 configs to keep profiling time manageable
+        MAX_CONFIGS = 20
+        if len(all_combos) > MAX_CONFIGS:
+            # Sample evenly
+            import random
+            random.seed(42)  # Reproducible
+            all_combos = random.sample(all_combos, MAX_CONFIGS)
+        
+        for m, n, k, warps, stages in all_combos:
+            config = {
+                'BLOCK_SIZE_M': m,
+                'BLOCK_SIZE_N': n,
+                'BLOCK_SIZE_K': k,
+                'num_warps': warps,
+                'num_stages': stages,
+            }
+            
+            # Validate shared memory constraint
+            shared_mem = (m * k + k * n) * 2 * stages
+            H100_LIMIT = 232448
+            if shared_mem <= H100_LIMIT:
+                configs.append(config)
+            else:
+                print(f"[MetaController] Skipping config (exceeds shared memory): {config}")
+        
+        if not configs:
+            # Fallback to default config
+            configs.append({
+                'BLOCK_SIZE_M': 64,
+                'BLOCK_SIZE_N': 64,
+                'BLOCK_SIZE_K': 32,
+                'num_warps': 8,
+                'num_stages': 4,
+            })
+        
+        return configs
 
     def _run_fast_loop(self, mission_plan_path):
         """Legacy method for backward compatibility."""
