@@ -173,6 +173,13 @@ class ServerMetaController:
         if not feedback_str:
             feedback_str = "No previous results. This is the first iteration."
         
+        # Print the feedback being used for LLM generation
+        print("\n" + "=" * 70)
+        print("[ServerMetaController] FEEDBACK FOR LLM PROMPT:")
+        print("=" * 70)
+        print(feedback_str)
+        print("=" * 70 + "\n")
+        
         # Build the prompt
         prompt = self._build_prompt(feedback_str)
         
@@ -180,6 +187,7 @@ class ServerMetaController:
         if self.llm is not None and self.tokenizer is not None:
             configs = self._generate_with_llm(prompt)
         else:
+            print("[ServerMetaController] LLM not available, using default configurations")
             configs = self._generate_default_configs()
         
         # Validate and return configs
@@ -193,6 +201,18 @@ class ServerMetaController:
         if not validated_configs:
             print("[ServerMetaController] No valid configs generated, using defaults")
             validated_configs = self._generate_default_configs()
+        
+        # Print the validated configurations that will be tested
+        print("\n" + "=" * 70)
+        print("[ServerMetaController] VALIDATED CONFIGURATIONS TO TEST:")
+        print("=" * 70)
+        for i, config in enumerate(validated_configs, 1):
+            print(f"\nConfig {i}: {config.get('name', 'unnamed')}")
+            print(f"  max_num_seqs: {config.get('max_num_seqs')}")
+            print(f"  max_num_batched_tokens: {config.get('max_num_batched_tokens')}")
+            if config.get('rationale'):
+                print(f"  rationale: {config.get('rationale')}")
+        print("=" * 70 + "\n")
         
         print(f"[ServerMetaController] Generated {len(validated_configs)} valid configurations")
         return validated_configs
@@ -315,10 +335,22 @@ NOW GENERATE YOUR CONFIGURATIONS:
             else:
                 llm_output = generated_text
             
-            print(f"[ServerMetaController] LLM raw response:\n{llm_output}")
+            # Print full LLM raw response before parsing (without truncation)
+            print("\n" + "=" * 70)
+            print("[ServerMetaController] FULL LLM RAW RESPONSE (before parsing):")
+            print("=" * 70)
+            print(llm_output)
+            print("=" * 70 + "\n")
             
             # Parse configs from output
             configs = self._parse_configs(llm_output)
+            
+            # Print parsed configs
+            print("\n[ServerMetaController] PARSED CONFIGS FROM LLM OUTPUT:")
+            for i, cfg in enumerate(configs, 1):
+                print(f"  Parsed config {i}: {cfg}")
+            print()
+            
             return configs
             
         except Exception as e:
@@ -437,7 +469,7 @@ NOW GENERATE YOUR CONFIGURATIONS:
         Returns:
             List of default configurations to test
         """
-        return [
+        default_configs = [
             {
                 "name": "aggressive_high",
                 "max_num_seqs": 128,
@@ -463,6 +495,13 @@ NOW GENERATE YOUR CONFIGURATIONS:
                 "rationale": "Low concurrency for minimal thermal impact"
             }
         ]
+        
+        print("\n[ServerMetaController] Using DEFAULT configurations (LLM unavailable):")
+        for cfg in default_configs:
+            print(f"  - {cfg['name']}: seqs={cfg['max_num_seqs']}, tokens={cfg['max_num_batched_tokens']}")
+        print()
+        
+        return default_configs
     
     def get_param_space(self) -> Dict[str, List[int]]:
         """Get the parameter space for server optimization.
