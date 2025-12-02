@@ -277,9 +277,12 @@ class ThermalMonitor:
             if s.temperature > self.config.target_sustained_temp
         ) * self.sample_interval
         
-        # Thermal status
+        # Thermal status flags
+        # On A100, throttling occurs at max_safe_temp (83°C)
         max_temp_exceeded = temp_max >= self.config.max_safe_temp
-        throttling_detected = temp_max >= self.config.max_safe_temp
+        # Throttling detected when any sample reached the throttle threshold
+        throttling_detected = max_temp_exceeded
+        # Thermally safe means staying below target sustained temp (75°C)
         is_thermally_safe = temp_max < self.config.target_sustained_temp
         
         return ThermalSummary(
