@@ -303,6 +303,117 @@ NOW GENERATE YOUR OPTIMIZED POLICY (JSON first, then reasoning):
     return optimization_prompt
 
 
+def build_direct_optimization_prompt(initial_ncu_report, feedback_collector=None):
+    """
+    Build optimization prompt for direct LLM configuration generation.
+    
+    This prompt asks the LLM to generate specific kernel configurations
+    (not search spaces) based on profiling metrics and feedback.
+    
+    Args:
+        initial_ncu_report: Initial NCU profiling data (raw CSV)
+        feedback_collector: Optional FeedbackCollector for contextual feedback
+        
+    Returns:
+        str: The formatted optimization prompt for direct config generation
+    """
+    # Format token counts for the prompt
+    token_counts_str = ", ".join(str(tc) for tc in TOKEN_COUNTS_TO_TEST)
+    
+    # Summarize NCU data
+    ncu_summary = summarize_ncu_report(initial_ncu_report)
+    
+    # Get feedback from previous iterations if available
+    feedback_section = ""
+    if feedback_collector:
+        feedback_section = feedback_collector.format_feedback_for_prompt()
+    
+    prompt = f'''You are an expert CUDA kernel optimization engineer. Generate specific kernel configurations for the fused_moe kernel.
+
+═══════════════════════════════════════════════════════════════════════════════
+                              KERNEL DETAILS
+═══════════════════════════════════════════════════════════════════════════════
+
+KERNEL: fused_moe_kernel (Triton)
+MODEL: {MODEL_NAME}
+- Number of Experts (E): {STATIC_BENCHMARK_ARGS['num_experts']}
+- Intermediate Size (N): {STATIC_BENCHMARK_ARGS['inter_size']}
+- Hidden Size: {STATIC_BENCHMARK_ARGS['hidden_size']}
+- Top-K Experts: {STATIC_BENCHMARK_ARGS['top_k']}
+- Data Type: {STATIC_BENCHMARK_ARGS['dtype']}
+
+TOKEN COUNTS TO OPTIMIZE: {token_counts_str}
+
+═══════════════════════════════════════════════════════════════════════════════
+                              HARDWARE SPECS
+═══════════════════════════════════════════════════════════════════════════════
+
+GPU: NVIDIA H100 80GB HBM3
+- Shared Memory per SM: 228 KB (232,448 bytes)
+- Shared memory formula: (M×K + K×N) × 2 × stages ≤ 232,448 bytes
+
+═══════════════════════════════════════════════════════════════════════════════
+                           BASELINE PROFILING METRICS
+═══════════════════════════════════════════════════════════════════════════════
+
+{ncu_summary}
+
+═══════════════════════════════════════════════════════════════════════════════
+                           VALID PARAMETER VALUES
+═══════════════════════════════════════════════════════════════════════════════
+
+- BLOCK_SIZE_M: 16, 32, 64, or 128
+- BLOCK_SIZE_N: 32, 64, or 128
+- BLOCK_SIZE_K: 32 or 64
+- num_warps: 4, 8, or 16
+- num_stages: 2, 3, 4, or 5
+{feedback_section}
+═══════════════════════════════════════════════════════════════════════════════
+                           YOUR TASK
+═══════════════════════════════════════════════════════════════════════════════
+
+Generate 3-5 specific kernel configurations to test. For EACH token count range, suggest the best configuration based on your analysis.
+
+Output format:
+<param>
+{{
+  "configs": [
+    {{
+      "token_counts": [1, 2, 4, 8, 16],
+      "BLOCK_SIZE_M": 64,
+      "BLOCK_SIZE_N": 64,
+      "BLOCK_SIZE_K": 32,
+      "num_warps": 8,
+      "num_stages": 4
+    }},
+    {{
+      "token_counts": [32, 64, 128, 256],
+      "BLOCK_SIZE_M": 128,
+      "BLOCK_SIZE_N": 128,
+      "BLOCK_SIZE_K": 64,
+      "num_warps": 16,
+      "num_stages": 5
+    }},
+    {{
+      "token_counts": [512, 1024, 2048, 4096],
+      "BLOCK_SIZE_M": 128,
+      "BLOCK_SIZE_N": 64,
+      "BLOCK_SIZE_K": 64,
+      "num_warps": 16,
+      "num_stages": 4
+    }}
+  ]
+}}
+</param>
+
+REASONING: <Brief 2-4 sentence explanation>
+
+NOW GENERATE YOUR CONFIGURATIONS:
+<param>
+'''
+    return prompt
+
+
 def main():
     """Main entry point for the hierarchical kernel optimizer."""
     _check_versions_and_env()
