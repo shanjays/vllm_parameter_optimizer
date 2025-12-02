@@ -480,10 +480,7 @@ class ProfilingWorker:
         except subprocess.TimeoutExpired as e:
             print("[ProfilingWorker] ERROR: vLLM benchmark timed out after 600 seconds")
             # Try to get partial output
-            if hasattr(e, 'stdout') and e.stdout:
-                print(f"[ProfilingWorker] Partial STDOUT:\n{e.stdout[-1000:] if isinstance(e.stdout, str) else e.stdout.decode('utf-8', errors='replace')[-1000:]}")
-            if hasattr(e, 'stderr') and e.stderr:
-                print(f"[ProfilingWorker] Partial STDERR:\n{e.stderr[-1000:] if isinstance(e.stderr, str) else e.stderr.decode('utf-8', errors='replace')[-1000:]}")
+            self._print_partial_output(e)
             if os.path.exists(config_path):
                 os.remove(config_path)
             return 0.0
@@ -570,6 +567,19 @@ class ProfilingWorker:
             print(f"[ProfilingWorker] ERROR: Could not read config file: {e}")
             return False
 
+    def _print_partial_output(self, exception) -> None:
+        """Helper to print partial output from a TimeoutExpired exception."""
+        if hasattr(exception, 'stdout') and exception.stdout:
+            stdout = exception.stdout
+            if not isinstance(stdout, str):
+                stdout = stdout.decode('utf-8', errors='replace')
+            print(f"[ProfilingWorker] Partial STDOUT:\n{stdout[-1000:]}")
+        if hasattr(exception, 'stderr') and exception.stderr:
+            stderr = exception.stderr
+            if not isinstance(stderr, str):
+                stderr = stderr.decode('utf-8', errors='replace')
+            print(f"[ProfilingWorker] Partial STDERR:\n{stderr[-1000:]}")
+
     def _check_dataset_exists(self, dataset_path: str) -> bool:
         """Check if the dataset file exists."""
         if not os.path.exists(dataset_path):
@@ -617,10 +627,10 @@ class ProfilingWorker:
                 print(f"[ProfilingWorker] ERROR TYPE: AssertionError - {assertion_error.group(1)[:200]}")
             return "assertion_error"
         else:
-            # Print last 50 lines of combined output to find the error
+            # Print last 20 lines of combined output to find the error
             lines = full_output.strip().split('\n')
-            print(f"[ProfilingWorker] Last 50 lines of output:")
-            for line in lines[-50:]:
+            print(f"[ProfilingWorker] Last 20 lines of output:")
+            for line in lines[-20:]:
                 print(f"  {line}")
             return "unknown"
 

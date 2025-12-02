@@ -132,7 +132,7 @@ def test_validate_config_file_valid():
     
     try:
         result = _validate_config_file_for_test(config_path)
-        assert result == True, f"Expected True, got {result}"
+        assert result is True, f"Expected True, got {result}"
     finally:
         os.unlink(config_path)
     print("✅ test_validate_config_file_valid PASSED")
@@ -141,7 +141,7 @@ def test_validate_config_file_valid():
 def test_validate_config_file_nonexistent():
     """Test that nonexistent file fails validation."""
     result = _validate_config_file_for_test("/nonexistent/path/to/config.json")
-    assert result == False, f"Expected False, got {result}"
+    assert result is False, f"Expected False, got {result}"
     print("✅ test_validate_config_file_nonexistent PASSED")
 
 
@@ -153,7 +153,7 @@ def test_validate_config_file_empty():
     
     try:
         result = _validate_config_file_for_test(config_path)
-        assert result == False, f"Expected False for empty config, got {result}"
+        assert result is False, f"Expected False for empty config, got {result}"
     finally:
         os.unlink(config_path)
     print("✅ test_validate_config_file_empty PASSED")
@@ -167,7 +167,7 @@ def test_validate_config_file_invalid_json():
     
     try:
         result = _validate_config_file_for_test(config_path)
-        assert result == False, f"Expected False for invalid JSON, got {result}"
+        assert result is False, f"Expected False for invalid JSON, got {result}"
     finally:
         os.unlink(config_path)
     print("✅ test_validate_config_file_invalid_json PASSED")
@@ -190,7 +190,7 @@ def test_check_dataset_exists_true():
     
     try:
         result = _check_dataset_exists_for_test(dataset_path)
-        assert result == True, f"Expected True, got {result}"
+        assert result is True, f"Expected True, got {result}"
     finally:
         os.unlink(dataset_path)
     print("✅ test_check_dataset_exists_true PASSED")
@@ -199,7 +199,7 @@ def test_check_dataset_exists_true():
 def test_check_dataset_exists_false():
     """Test that nonexistent file returns False."""
     result = _check_dataset_exists_for_test("/nonexistent/dataset.json")
-    assert result == False, f"Expected False, got {result}"
+    assert result is False, f"Expected False, got {result}"
     print("✅ test_check_dataset_exists_false PASSED")
 
 
