@@ -32,6 +32,11 @@ try:
 except ImportError:
     from thermal_monitor import ThermalSummary
 
+try:
+    from .server_profiling_worker import is_benchmark_successful
+except ImportError:
+    from server_profiling_worker import is_benchmark_successful
+
 
 @dataclass
 class ServerConfig:
@@ -142,16 +147,8 @@ class ServerConfigExporter:
         }
         self.all_results.append(result_record)
         
-        # Skip failed benchmarks entirely - use is_successful if available, fallback to error check
-        is_successful = True
-        if hasattr(result, 'is_successful'):
-            is_successful = result.is_successful
-        elif hasattr(result, 'error') and result.error:
-            is_successful = False
-        elif hasattr(result, 'throughput') and result.throughput <= 0.0:
-            is_successful = False
-            
-        if not is_successful:
+        # Skip failed benchmarks entirely - use centralized utility function
+        if not is_benchmark_successful(result):
             penalty_str = f" (penalty: {penalty})" if penalty != 0.0 else ""
             print(f"[ServerConfigExporter] Skipping failed benchmark{penalty_str}")
             return False

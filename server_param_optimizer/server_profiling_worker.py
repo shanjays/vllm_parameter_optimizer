@@ -170,6 +170,37 @@ def log_error_details(error: str, config: Dict[str, Any]) -> None:
     print(f"{'='*60}\n")
 
 
+def is_benchmark_successful(result) -> bool:
+    """Check if a benchmark result was successful.
+    
+    Works with both BenchmarkResult objects and dictionaries.
+    This is the single source of truth for determining success.
+    
+    Args:
+        result: BenchmarkResult object or dictionary
+        
+    Returns:
+        True if benchmark completed successfully
+    """
+    # If it's a BenchmarkResult with is_successful property, use that
+    if hasattr(result, 'is_successful'):
+        return result.is_successful
+    
+    # For dictionaries, check the explicit is_successful field first
+    if isinstance(result, dict):
+        if 'is_successful' in result:
+            return result['is_successful']
+        # Fallback logic for dicts without explicit is_successful
+        has_error = bool(result.get('error', ''))
+        has_throughput = result.get('throughput', 0.0) > 0.0
+        return not has_error and has_throughput
+    
+    # Fallback for other types - check attributes
+    error = getattr(result, 'error', '') or ''
+    throughput = getattr(result, 'throughput', 0.0) or 0.0
+    return error == "" and throughput > 0.0
+
+
 @dataclass
 class BenchmarkResult:
     """Result from a vLLM benchmark run."""

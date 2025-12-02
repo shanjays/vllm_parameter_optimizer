@@ -13,9 +13,36 @@ Features:
 
 import json
 import os
+import sys
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Set, Tuple
+
+# Add parent directory to path for script execution
+if __name__ == "__main__" or "." not in __name__:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Import with fallback for both module and script execution
+try:
+    from .server_profiling_worker import is_benchmark_successful
+except ImportError:
+    try:
+        from server_profiling_worker import is_benchmark_successful
+    except ImportError:
+        # Fallback if server_profiling_worker not available
+        def is_benchmark_successful(result) -> bool:
+            """Fallback success check."""
+            if hasattr(result, 'is_successful'):
+                return result.is_successful
+            if isinstance(result, dict):
+                if 'is_successful' in result:
+                    return result['is_successful']
+                has_error = bool(result.get('error', ''))
+                has_throughput = result.get('throughput', 0.0) > 0.0
+                return not has_error and has_throughput
+            error = getattr(result, 'error', '') or ''
+            throughput = getattr(result, 'throughput', 0.0) or 0.0
+            return error == "" and throughput > 0.0
 
 
 @dataclass
@@ -109,17 +136,12 @@ class ServerFeedbackCollector:
             if i < len(configs):
                 result_dict['config'] = configs[i]
             
-            # Extract error information for RL learning
-            is_successful = result_dict.get('is_successful', True)
-            if not is_successful:
-                # If is_successful not explicitly set, check for error
-                if result_dict.get('error') or result_dict.get('throughput', 0.0) <= 0.0:
-                    is_successful = False
-            
-            result_dict['is_successful'] = is_successful
+            # Use centralized utility function for success check
+            successful = is_benchmark_successful(result)
+            result_dict['is_successful'] = successful
             
             # Track effective throughput for RL reward
-            if is_successful:
+            if successful:
                 result_dict['effective_throughput'] = result_dict.get('throughput', 0.0)
             else:
                 result_dict['effective_throughput'] = result_dict.get('penalty', -10.0)
@@ -128,7 +150,7 @@ class ServerFeedbackCollector:
             processed_results.append(result_dict)
             
             # Update best configs (only for successful benchmarks)
-            if is_successful:
+            if successful:
                 throughput = result_dict.get('throughput', 0.0)
                 is_thermally_safe = result_dict.get('is_thermally_safe', False)
                 config = configs[i] if i < len(configs) else {}

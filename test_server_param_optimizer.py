@@ -983,6 +983,63 @@ def test_log_error_details():
     print("✅ test_log_error_details PASSED")
 
 
+def test_is_benchmark_successful():
+    """Test is_benchmark_successful utility function."""
+    from server_param_optimizer.server_profiling_worker import (
+        is_benchmark_successful, 
+        BenchmarkResult, 
+        BenchmarkErrorType
+    )
+    
+    # Test with BenchmarkResult object (successful)
+    success_result = BenchmarkResult(
+        config={'max_num_seqs': 64},
+        throughput=1500.0,
+        output_throughput=1200.0,
+        latency=None,
+        thermal_summary=None,
+        is_thermally_safe=True,
+        nsys_metrics=None,
+        duration=60.0,
+        error=""
+    )
+    assert is_benchmark_successful(success_result) == True
+    
+    # Test with BenchmarkResult object (failed)
+    failed_result = BenchmarkResult(
+        config={'max_num_seqs': 256},
+        throughput=0.0,
+        output_throughput=0.0,
+        latency=None,
+        thermal_summary=None,
+        is_thermally_safe=False,
+        nsys_metrics=None,
+        duration=5.0,
+        error="OOM error",
+        error_type=BenchmarkErrorType.VRAM_OOM,
+        penalty=-100.0
+    )
+    assert is_benchmark_successful(failed_result) == False
+    
+    # Test with dictionary (successful)
+    success_dict = {'throughput': 1500.0, 'error': '', 'is_successful': True}
+    assert is_benchmark_successful(success_dict) == True
+    
+    # Test with dictionary (failed, explicit is_successful)
+    failed_dict_explicit = {'throughput': 0.0, 'error': 'error', 'is_successful': False}
+    assert is_benchmark_successful(failed_dict_explicit) == False
+    
+    # Test with dictionary (failed, inferred from fields)
+    failed_dict_inferred = {'throughput': 0.0, 'error': 'OOM'}
+    assert is_benchmark_successful(failed_dict_inferred) == False
+    
+    # Test with dictionary (successful, inferred from fields)
+    success_dict_inferred = {'throughput': 1000.0, 'error': ''}
+    assert is_benchmark_successful(success_dict_inferred) == True
+    
+    print("✅ test_is_benchmark_successful PASSED")
+
+
 # ============================================================
 # ServerProfilingWorkerLocal Tests
 # ============================================================
@@ -1866,6 +1923,7 @@ if __name__ == "__main__":
     test_benchmark_result_is_successful()
     test_benchmark_result_with_error_type()
     test_log_error_details()
+    test_is_benchmark_successful()
     
     print("\n=== ServerProfilingWorkerLocal Tests ===")
     test_server_profiling_worker_local_init()
