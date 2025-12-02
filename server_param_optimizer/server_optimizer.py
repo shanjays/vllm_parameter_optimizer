@@ -50,6 +50,74 @@ THERMAL_CONFIG = ThermalConfig(
 )
 
 
+def _get_thermal_value(thermal_summary: Any, key: str, default: float = 0.0) -> float:
+    """Helper to safely extract a value from thermal summary.
+    
+    Args:
+        thermal_summary: ThermalSummary object or dict
+        key: Key to extract (e.g., 'temp_max', 'temp_avg')
+        default: Default value if key not found
+        
+    Returns:
+        Extracted value or default
+    """
+    if thermal_summary is None:
+        return default
+    if hasattr(thermal_summary, key):
+        return getattr(thermal_summary, key)
+    if isinstance(thermal_summary, dict):
+        return thermal_summary.get(key, default)
+    return default
+
+
+class _ThermalSummaryProxy:
+    """Proxy class to provide ThermalSummary-like interface from dict data.
+    
+    Used when thermal_summary is a dict (e.g., after JSON serialization)
+    but we need an object with to_dict() method for visualization.
+    """
+    def __init__(self, data: Dict[str, Any]):
+        self.duration_seconds = data.get('duration_seconds', 0.0)
+        self.sample_count = data.get('sample_count', 0)
+        self.temp_min = data.get('temp_min', 0.0)
+        self.temp_max = data.get('temp_max', 0.0)
+        self.temp_avg = data.get('temp_avg', 0.0)
+        self.temp_final = data.get('temp_final', 0.0)
+        self.power_min = data.get('power_min', 0.0)
+        self.power_max = data.get('power_max', 0.0)
+        self.power_avg = data.get('power_avg', 0.0)
+        self.memory_max_used_mb = data.get('memory_max_used_mb', 0.0)
+        self.memory_max_used_pct = data.get('memory_max_used_pct', 0.0)
+        self.gpu_util_avg = data.get('gpu_util_avg', 0.0)
+        self.memory_util_avg = data.get('memory_util_avg', 0.0)
+        self.is_thermally_safe = data.get('is_thermally_safe', True)
+        self.max_temp_exceeded = data.get('max_temp_exceeded', False)
+        self.throttling_detected = data.get('throttling_detected', False)
+        self.time_above_target = data.get('time_above_target', 0.0)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            'duration_seconds': self.duration_seconds,
+            'sample_count': self.sample_count,
+            'temp_min': self.temp_min,
+            'temp_max': self.temp_max,
+            'temp_avg': self.temp_avg,
+            'temp_final': self.temp_final,
+            'power_min': self.power_min,
+            'power_max': self.power_max,
+            'power_avg': self.power_avg,
+            'memory_max_used_mb': self.memory_max_used_mb,
+            'memory_max_used_pct': self.memory_max_used_pct,
+            'gpu_util_avg': self.gpu_util_avg,
+            'memory_util_avg': self.memory_util_avg,
+            'is_thermally_safe': self.is_thermally_safe,
+            'max_temp_exceeded': self.max_temp_exceeded,
+            'throttling_detected': self.throttling_detected,
+            'time_above_target': self.time_above_target,
+        }
+
+
 class ServerParameterOptimizer:
     """Main optimizer for vLLM server parameters.
     
@@ -260,12 +328,11 @@ class ServerParameterOptimizer:
         else:
             print(f"[Benchmark] Throughput: {result.throughput:.1f} tokens/sec")
         
-        # Print thermal summary
+        # Print thermal summary using helper function
         if result.thermal_summary:
-            ts = result.thermal_summary
-            temp_min = ts.temp_min if hasattr(ts, 'temp_min') else ts.get('temp_min', 0)
-            temp_max = ts.temp_max if hasattr(ts, 'temp_max') else ts.get('temp_max', 0)
-            temp_avg = ts.temp_avg if hasattr(ts, 'temp_avg') else ts.get('temp_avg', 0)
+            temp_min = _get_thermal_value(result.thermal_summary, 'temp_min')
+            temp_max = _get_thermal_value(result.thermal_summary, 'temp_max')
+            temp_avg = _get_thermal_value(result.thermal_summary, 'temp_avg')
             print(f"[ThermalMonitor] Temp: min={temp_min:.0f}°C, max={temp_max:.0f}°C, avg={temp_avg:.1f}°C")
         
         # Save thermal plot
@@ -273,10 +340,7 @@ class ServerParameterOptimizer:
         
         # Print thermal status
         if result.is_thermally_safe:
-            temp_max = 0
-            if result.thermal_summary:
-                ts = result.thermal_summary
-                temp_max = ts.temp_max if hasattr(ts, 'temp_max') else ts.get('temp_max', 0)
+            temp_max = _get_thermal_value(result.thermal_summary, 'temp_max')
             print(f"[ServerOptimizer] ✓ Thermally safe (max {temp_max:.0f}°C < {self.thermal_config.target_sustained_temp}°C target)")
             if self._is_new_best_sustained(result):
                 print("[ServerOptimizer] → New best SUSTAINED config!")
@@ -330,51 +394,8 @@ class ServerParameterOptimizer:
             if hasattr(result.thermal_summary, 'to_dict'):
                 summary = result.thermal_summary
             else:
-                # Create a mock summary object for visualization
-                from dataclasses import dataclass
-                @dataclass
-                class TempSummary:
-                    duration_seconds: float = 0
-                    sample_count: int = 0
-                    temp_min: float = 0
-                    temp_max: float = 0
-                    temp_avg: float = 0
-                    temp_final: float = 0
-                    power_min: float = 0
-                    power_max: float = 0
-                    power_avg: float = 0
-                    memory_max_used_mb: float = 0
-                    memory_max_used_pct: float = 0
-                    gpu_util_avg: float = 0
-                    memory_util_avg: float = 0
-                    is_thermally_safe: bool = True
-                    max_temp_exceeded: bool = False
-                    throttling_detected: bool = False
-                    time_above_target: float = 0
-                    
-                    def to_dict(self):
-                        return self.__dict__
-                
-                ts = result.thermal_summary
-                summary = TempSummary(
-                    duration_seconds=ts.get('duration_seconds', 0),
-                    sample_count=ts.get('sample_count', 0),
-                    temp_min=ts.get('temp_min', 0),
-                    temp_max=ts.get('temp_max', 0),
-                    temp_avg=ts.get('temp_avg', 0),
-                    temp_final=ts.get('temp_final', 0),
-                    power_min=ts.get('power_min', 0),
-                    power_max=ts.get('power_max', 0),
-                    power_avg=ts.get('power_avg', 0),
-                    memory_max_used_mb=ts.get('memory_max_used_mb', 0),
-                    memory_max_used_pct=ts.get('memory_max_used_pct', 0),
-                    gpu_util_avg=ts.get('gpu_util_avg', 0),
-                    memory_util_avg=ts.get('memory_util_avg', 0),
-                    is_thermally_safe=ts.get('is_thermally_safe', True),
-                    max_temp_exceeded=ts.get('max_temp_exceeded', False),
-                    throttling_detected=ts.get('throttling_detected', False),
-                    time_above_target=ts.get('time_above_target', 0)
-                )
+                # Use module-level proxy class to wrap dict data
+                summary = _ThermalSummaryProxy(result.thermal_summary)
         else:
             return
         
@@ -468,9 +489,8 @@ class ServerParameterOptimizer:
             print(f"   --max-num-seqs {ba.max_num_seqs}")
             print(f"   --max-num-batched-tokens {ba.max_num_batched_tokens}")
             print(f"   Throughput: {ba.throughput:.1f} tokens/sec")
-            if ba.thermal_summary:
-                ts = ba.thermal_summary
-                temp_max = ts.get('temp_max', 0) if isinstance(ts, dict) else ts.temp_max
+            temp_max = _get_thermal_value(ba.thermal_summary, 'temp_max')
+            if temp_max > 0:
                 print(f"   Max Temp: {temp_max:.0f}°C")
             print("   ⚠️  May cause thermal throttling in long runs!")
         else:
@@ -483,9 +503,8 @@ class ServerParameterOptimizer:
             print(f"   --max-num-seqs {bs.max_num_seqs}")
             print(f"   --max-num-batched-tokens {bs.max_num_batched_tokens}")
             print(f"   Throughput: {bs.throughput:.1f} tokens/sec")
-            if bs.thermal_summary:
-                ts = bs.thermal_summary
-                temp_max = ts.get('temp_max', 0) if isinstance(ts, dict) else ts.temp_max
+            temp_max = _get_thermal_value(bs.thermal_summary, 'temp_max')
+            if temp_max > 0:
                 print(f"   Max Temp: {temp_max:.0f}°C")
             print("   ✓ Safe for continuous operation")
         else:

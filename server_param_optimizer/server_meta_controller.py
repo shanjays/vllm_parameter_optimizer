@@ -44,6 +44,11 @@ GPU_CONFIG = {
     'target_sustained_temp': 75,
 }
 
+# Minimum tokens per sequence for constraint validation
+# This represents the minimum average token count per sequence
+# Constraint: max_num_batched_tokens >= max_num_seqs * MIN_TOKENS_PER_SEQUENCE
+MIN_TOKENS_PER_SEQUENCE = 128
+
 
 class ServerMetaController:
     """LLM-based meta-controller for server parameter optimization.
@@ -269,8 +274,11 @@ NOW GENERATE YOUR CONFIGURATIONS:
                 max_length=MAX_SEQ_LENGTH - MAX_COMPLETION_LENGTH
             )
             
-            # Move to device
-            if torch.cuda.is_available():
+            # Move inputs to the same device as the model
+            if self.llm is not None and hasattr(self.llm, 'device'):
+                model_device = self.llm.device
+                inputs = {k: v.to(model_device) for k, v in inputs.items()}
+            elif torch.cuda.is_available() and self.device == "cuda":
                 inputs = {k: v.cuda() for k, v in inputs.items()}
             
             # Generate
@@ -400,10 +408,10 @@ NOW GENERATE YOUR CONFIGURATIONS:
             max_num_batched_tokens = min(valid_tokens, key=lambda x: abs(x - max_num_batched_tokens))
             config['max_num_batched_tokens'] = max_num_batched_tokens
         
-        # Check constraint: max_num_batched_tokens >= max_num_seqs * 128
-        if max_num_batched_tokens < max_num_seqs * 128:
+        # Check constraint: max_num_batched_tokens >= max_num_seqs * MIN_TOKENS_PER_SEQUENCE
+        if max_num_batched_tokens < max_num_seqs * MIN_TOKENS_PER_SEQUENCE:
             print(f"[ServerMetaController] Config violates constraint: "
-                  f"tokens={max_num_batched_tokens} < seqs={max_num_seqs} * 128")
+                  f"tokens={max_num_batched_tokens} < seqs={max_num_seqs} * {MIN_TOKENS_PER_SEQUENCE}")
             return False
         
         return True
