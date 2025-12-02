@@ -260,7 +260,7 @@ class ServerFeedbackCollector:
         
         lines.append("")
         lines.append(f"YOUR GOAL: Find configs that exceed {self.best_aggressive_throughput:.2f} tokens/sec")
-        lines.append("           while maintaining thermal safety (<75°C for A100)")
+        lines.append("           while maintaining thermal safety (<75°C for H100)")
         lines.append("")
         
         return "\n".join(lines)

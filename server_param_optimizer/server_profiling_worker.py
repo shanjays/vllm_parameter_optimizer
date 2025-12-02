@@ -2,7 +2,7 @@
 Server Profiling Worker for vLLM Benchmarks
 
 Ray-based profiling worker for running vLLM throughput benchmarks with thermal monitoring.
-Optimizes --max-num-seqs and --max-num-batched-tokens for A100 40GB GPU.
+Optimizes --max-num-seqs and --max-num-batched-tokens for H100 80GB GPU.
 
 Features:
 - Ray actor that runs on a dedicated GPU
@@ -154,7 +154,7 @@ def log_error_details(error: str, config: Dict[str, Any]) -> None:
         print(f"\n[DEBUG HINT] VRAM exceeded! Try reducing:")
         print(f"  - max_num_seqs (current: {config.get('max_num_seqs')})")
         print(f"  - max_num_batched_tokens (current: {config.get('max_num_batched_tokens')})")
-        print(f"  - For A100 40GB, try max_num_seqs <= 64, max_num_batched_tokens <= 16384")
+        print(f"  - For H100 80GB, try max_num_seqs <= 128, max_num_batched_tokens <= 32768")
     elif error_type == BenchmarkErrorType.ENGINE_INIT_FAILED:
         print(f"\n[DEBUG HINT] Engine init failed - likely VRAM or config issue")
         print(f"  - Check if another process is using GPU memory")
@@ -253,7 +253,7 @@ class BenchmarkResult:
 
 # Default configuration for the target GPU and model
 DEFAULT_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
-DEFAULT_GPU = "NVIDIA A100 40GB"
+DEFAULT_GPU = "NVIDIA H100 80GB"
 DEFAULT_BENCHMARK_DURATION_MINUTES = 20
 DEFAULT_NUM_PROMPTS = 500
 
