@@ -77,6 +77,10 @@ BENCHMARK_DURATION_MINUTES = 20
 NUM_ITERATIONS = 8
 OUTPUT_DIR = "./server_optimization_results"
 
+# GPU assignment (for multi-GPU systems)
+LLM_GPU_ID = 0        # GPU for LLM meta-controller
+BENCHMARK_GPU_ID = 1  # GPU for vLLM benchmarks
+
 # Thermal thresholds for A100 40GB
 THERMAL_CONFIG = ThermalConfig(
     max_safe_temp=83.0,
@@ -86,6 +90,53 @@ THERMAL_CONFIG = ThermalConfig(
     total_memory_gb=40.0,
     gpu_name=GPU_TYPE
 )
+
+
+def get_available_gpus() -> List[int]:
+    """Get list of available GPU indices.
+    
+    Returns:
+        List of GPU indices (e.g., [0, 1, 2]).
+        Falls back to [0] if nvidia-smi fails (assumes at least one GPU).
+    """
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['nvidia-smi', '--query-gpu=index', '--format=csv,noheader'],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            gpus = [int(x.strip()) for x in result.stdout.strip().split('\n') if x.strip()]
+            if gpus:
+                return gpus
+    except Exception:
+        pass
+    # Default to GPU 0 if nvidia-smi is not available or fails.
+    # This is intentional as most GPU systems have at least GPU 0.
+    return [0]
+
+
+def validate_gpu_assignment(llm_gpu: int, benchmark_gpu: int) -> None:
+    """Validate GPU assignment and warn if using same GPU.
+    
+    Args:
+        llm_gpu: GPU ID for LLM meta-controller
+        benchmark_gpu: GPU ID for vLLM benchmarks
+    """
+    available = get_available_gpus()
+    
+    if llm_gpu not in available:
+        print(f"[WARNING] LLM GPU {llm_gpu} not available. Available: {available}")
+    if benchmark_gpu not in available:
+        print(f"[WARNING] Benchmark GPU {benchmark_gpu} not available. Available: {available}")
+    
+    if llm_gpu == benchmark_gpu:
+        print(f"\n{'='*60}")
+        print(f"[WARNING] LLM and Benchmark using SAME GPU ({llm_gpu})!")
+        print(f"This may cause VRAM conflicts and failures.")
+        print(f"Consider using --llm-gpu and --benchmark-gpu with different values.")
+        print(f"Available GPUs: {available}")
+        print(f"{'='*60}\n")
 
 
 def _get_thermal_value(thermal_summary: Any, key: str, default: float = 0.0) -> float:
@@ -180,7 +231,8 @@ class ServerParameterOptimizer:
         benchmark_duration_minutes: int = BENCHMARK_DURATION_MINUTES,
         num_iterations: int = NUM_ITERATIONS,
         output_dir: str = OUTPUT_DIR,
-        gpu_id: int = 0,
+        llm_gpu_id: int = LLM_GPU_ID,
+        benchmark_gpu_id: int = BENCHMARK_GPU_ID,
         use_ray: bool = False,
         thermal_config: Optional[ThermalConfig] = None
     ):
@@ -192,7 +244,8 @@ class ServerParameterOptimizer:
             benchmark_duration_minutes: Duration of each benchmark run
             num_iterations: Number of optimization iterations
             output_dir: Directory to save results
-            gpu_id: GPU device index
+            llm_gpu_id: GPU device index for LLM meta-controller
+            benchmark_gpu_id: GPU device index for vLLM benchmarks
             use_ray: Whether to use Ray for distributed profiling
             thermal_config: Custom thermal configuration
         """
@@ -201,9 +254,13 @@ class ServerParameterOptimizer:
         self.benchmark_duration_minutes = benchmark_duration_minutes
         self.num_iterations = num_iterations
         self.output_dir = output_dir
-        self.gpu_id = gpu_id
+        self.llm_gpu_id = llm_gpu_id
+        self.benchmark_gpu_id = benchmark_gpu_id
         self.use_ray = use_ray and RAY_AVAILABLE
         self.thermal_config = thermal_config or THERMAL_CONFIG
+        
+        # Validate GPU assignment
+        validate_gpu_assignment(llm_gpu_id, benchmark_gpu_id)
         
         # Create output directories
         os.makedirs(output_dir, exist_ok=True)
@@ -223,27 +280,28 @@ class ServerParameterOptimizer:
     def _init_components(self) -> None:
         """Initialize all optimizer components."""
         print("[ServerOptimizer] Initializing components...")
+        print(f"[ServerOptimizer] LLM GPU: {self.llm_gpu_id}, Benchmark GPU: {self.benchmark_gpu_id}")
         
-        # LLM meta-controller
-        self.meta_controller = ServerMetaController()
+        # LLM meta-controller (with explicit GPU)
+        self.meta_controller = ServerMetaController(gpu_id=self.llm_gpu_id)
         
-        # Profiling worker
+        # Profiling worker (on separate GPU)
         if self.use_ray:
             if not ray.is_initialized():
                 ray.init(ignore_reinit_error=True, include_dashboard=False)
             self.worker = ServerProfilingWorker.remote(
-                gpu_id=self.gpu_id,
+                gpu_id=self.benchmark_gpu_id,
                 model=self.model_name,
                 thermal_config=self.thermal_config
             )
-            print(f"[ServerOptimizer] Using Ray profiling worker on GPU {self.gpu_id}")
+            print(f"[ServerOptimizer] Using Ray profiling worker on GPU {self.benchmark_gpu_id}")
         else:
             self.worker = ServerProfilingWorkerLocal(
-                gpu_id=self.gpu_id,
+                gpu_id=self.benchmark_gpu_id,
                 model=self.model_name,
                 thermal_config=self.thermal_config
             )
-            print(f"[ServerOptimizer] Using local profiling worker on GPU {self.gpu_id}")
+            print(f"[ServerOptimizer] Using local profiling worker on GPU {self.benchmark_gpu_id}")
         
         # Config exporter
         self.config_exporter = ServerConfigExporter(
@@ -267,6 +325,7 @@ class ServerParameterOptimizer:
         print("\n" + "═" * 70)
         print(f"Server Parameter Optimization for {self.model_name}")
         print(f"GPU: {self.gpu_type}")
+        print(f"LLM GPU: {self.llm_gpu_id} | Benchmark GPU: {self.benchmark_gpu_id}")
         print(f"Benchmark Duration: {self.benchmark_duration_minutes} minutes per config")
         print("═" * 70 + "\n")
     
@@ -566,6 +625,22 @@ class ServerParameterOptimizer:
 
 def main():
     """Main entry point for the server parameter optimizer."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Server Parameter Optimizer for vLLM")
+    parser.add_argument("--llm-gpu", type=int, default=LLM_GPU_ID,
+                        help=f"GPU ID for LLM meta-controller (default: {LLM_GPU_ID})")
+    parser.add_argument("--benchmark-gpu", type=int, default=BENCHMARK_GPU_ID,
+                        help=f"GPU ID for vLLM benchmarks (default: {BENCHMARK_GPU_ID})")
+    parser.add_argument("--duration", type=int, default=BENCHMARK_DURATION_MINUTES,
+                        help=f"Benchmark duration in minutes (default: {BENCHMARK_DURATION_MINUTES})")
+    parser.add_argument("--iterations", type=int, default=NUM_ITERATIONS,
+                        help=f"Number of optimization iterations (default: {NUM_ITERATIONS})")
+    parser.add_argument("--output-dir", type=str, default=OUTPUT_DIR,
+                        help=f"Output directory (default: {OUTPUT_DIR})")
+    
+    args = parser.parse_args()
+    
     print("\n" + "═" * 70)
     print("          SERVER PARAMETER OPTIMIZER FOR VLLM")
     print("═" * 70)
@@ -573,9 +648,11 @@ def main():
     optimizer = ServerParameterOptimizer(
         model_name=MODEL_NAME,
         gpu_type=GPU_TYPE,
-        benchmark_duration_minutes=BENCHMARK_DURATION_MINUTES,
-        num_iterations=NUM_ITERATIONS,
-        output_dir=OUTPUT_DIR
+        benchmark_duration_minutes=args.duration,
+        num_iterations=args.iterations,
+        output_dir=args.output_dir,
+        llm_gpu_id=args.llm_gpu,
+        benchmark_gpu_id=args.benchmark_gpu,
     )
     
     optimizer.run_optimization()
