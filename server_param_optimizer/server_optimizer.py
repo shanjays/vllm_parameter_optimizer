@@ -96,7 +96,8 @@ def get_available_gpus() -> List[int]:
     """Get list of available GPU indices.
     
     Returns:
-        List of GPU indices (e.g., [0, 1, 2])
+        List of GPU indices (e.g., [0, 1, 2]).
+        Falls back to [0] if nvidia-smi fails (assumes at least one GPU).
     """
     try:
         import subprocess
@@ -106,10 +107,13 @@ def get_available_gpus() -> List[int]:
         )
         if result.returncode == 0:
             gpus = [int(x.strip()) for x in result.stdout.strip().split('\n') if x.strip()]
-            return gpus
+            if gpus:
+                return gpus
     except Exception:
         pass
-    return [0]  # Default to GPU 0
+    # Default to GPU 0 if nvidia-smi is not available or fails.
+    # This is intentional as most GPU systems have at least GPU 0.
+    return [0]
 
 
 def validate_gpu_assignment(llm_gpu: int, benchmark_gpu: int) -> None:

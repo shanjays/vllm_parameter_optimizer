@@ -9,7 +9,6 @@ Target: NVIDIA A100 40GB with meta-llama/Llama-3.1-8B-Instruct
 """
 
 import json
-import os
 import re
 import ast
 from typing import Dict, List, Optional, Any
@@ -113,12 +112,9 @@ class ServerMetaController:
         
         print(f"[ServerMetaController] Loading LLM '{self.model_name}' on GPU {self.gpu_id}...")
         
-        # Save current CUDA device and set to our GPU
-        prev_cuda = os.environ.get("CUDA_VISIBLE_DEVICES")
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
-        
         try:
-            # Load model with Unsloth optimization (same pattern as hierarchical_kernel_optimizer.py)
+            # Load model with Unsloth optimization
+            # Use device_map for explicit GPU targeting without modifying environment variables
             self.llm, self.tokenizer = FastLanguageModel.from_pretrained(
                 model_name=self.model_name,
                 max_seq_length=self.max_seq_length,
@@ -150,12 +146,6 @@ class ServerMetaController:
             print(f"[ServerMetaController] Error loading LLM: {e}")
             print("[ServerMetaController] Falling back to default configs")
             self._initialized = True
-        finally:
-            # Restore previous CUDA setting
-            if prev_cuda is not None:
-                os.environ["CUDA_VISIBLE_DEVICES"] = prev_cuda
-            elif "CUDA_VISIBLE_DEVICES" in os.environ:
-                del os.environ["CUDA_VISIBLE_DEVICES"]
     
     def generate_configs(
         self,
