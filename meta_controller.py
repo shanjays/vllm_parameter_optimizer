@@ -5,6 +5,8 @@ import time
 import os
 import re
 import ast
+import random
+from itertools import product
 from profiling_worker import ProfilingWorker
 from config_exporter import TOKEN_COUNTS_ALL
 
@@ -777,16 +779,13 @@ class MetaControllerReward:
         stage_values = search_space.get('num_stages', [3, 4, 5])
         
         # Generate all combinations up to a reasonable limit
-        from itertools import product
         all_combos = list(product(m_values, n_values, k_values, warp_values, stage_values))
         
-        # Limit to max 20 configs to keep profiling time manageable
-        MAX_CONFIGS = 20
-        if len(all_combos) > MAX_CONFIGS:
+        # Limit to max configs to keep profiling time manageable
+        if len(all_combos) > MAX_CONFIGS_PER_PHASE:
             # Sample evenly
-            import random
             random.seed(42)  # Reproducible
-            all_combos = random.sample(all_combos, MAX_CONFIGS)
+            all_combos = random.sample(all_combos, MAX_CONFIGS_PER_PHASE)
         
         for m, n, k, warps, stages in all_combos:
             config = {
