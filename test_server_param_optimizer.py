@@ -7,8 +7,12 @@ These tests verify:
 3. ThermalVisualizer availability checking
 4. NsysMetricsExtractor availability checking and stats parsing
 5. Module imports and exports
+6. ServerProfilingWorker and BenchmarkResult
+7. ServerConfigExporter and ServerConfig
+8. ServerFeedbackCollector and IterationFeedback
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -670,6 +674,666 @@ def test_module_imports():
 
 
 # ============================================================
+# BenchmarkResult Tests
+# ============================================================
+
+def test_benchmark_result_creation():
+    """Test BenchmarkResult dataclass creation."""
+    from server_param_optimizer.server_profiling_worker import BenchmarkResult
+    
+    result = BenchmarkResult(
+        config={'max_num_seqs': 256, 'max_num_batched_tokens': 8192},
+        throughput=1500.0,
+        output_throughput=1200.0,
+        latency=50.0,
+        thermal_summary=None,
+        is_thermally_safe=True,
+        nsys_metrics=None,
+        duration=120.0,
+        error=""
+    )
+    
+    assert result.config['max_num_seqs'] == 256
+    assert result.throughput == 1500.0
+    assert result.output_throughput == 1200.0
+    assert result.is_thermally_safe == True
+    assert result.duration == 120.0
+    assert result.error == ""
+    
+    print("✅ test_benchmark_result_creation PASSED")
+
+
+def test_benchmark_result_to_dict():
+    """Test BenchmarkResult serialization to dict."""
+    from server_param_optimizer.server_profiling_worker import BenchmarkResult
+    
+    result = BenchmarkResult(
+        config={'max_num_seqs': 128},
+        throughput=1000.0,
+        output_throughput=800.0,
+        latency=None,
+        thermal_summary=None,
+        is_thermally_safe=False,
+        nsys_metrics={'kernel_count': 100},
+        duration=60.0
+    )
+    
+    d = result.to_dict()
+    
+    assert isinstance(d, dict)
+    assert d['config']['max_num_seqs'] == 128
+    assert d['throughput'] == 1000.0
+    assert d['is_thermally_safe'] == False
+    assert d['nsys_metrics']['kernel_count'] == 100
+    
+    print("✅ test_benchmark_result_to_dict PASSED")
+
+
+def test_benchmark_result_with_thermal_summary():
+    """Test BenchmarkResult with ThermalSummary."""
+    from server_param_optimizer.server_profiling_worker import BenchmarkResult
+    from server_param_optimizer.thermal_monitor import ThermalSummary
+    
+    thermal_summary = ThermalSummary(
+        duration_seconds=120.0,
+        sample_count=120,
+        temp_min=60.0,
+        temp_max=72.0,
+        temp_avg=68.0,
+        temp_final=70.0,
+        power_min=250.0,
+        power_max=350.0,
+        power_avg=300.0,
+        memory_max_used_mb=30000.0,
+        memory_max_used_pct=75.0,
+        gpu_util_avg=90.0,
+        memory_util_avg=60.0,
+        is_thermally_safe=True,
+        max_temp_exceeded=False,
+        throttling_detected=False,
+        time_above_target=0.0
+    )
+    
+    result = BenchmarkResult(
+        config={'max_num_seqs': 256},
+        throughput=1500.0,
+        output_throughput=1200.0,
+        latency=45.0,
+        thermal_summary=thermal_summary,
+        is_thermally_safe=True,
+        nsys_metrics=None,
+        duration=120.0
+    )
+    
+    d = result.to_dict()
+    
+    assert d['thermal_summary'] is not None
+    assert d['thermal_summary']['temp_max'] == 72.0
+    assert d['thermal_summary']['is_thermally_safe'] == True
+    
+    print("✅ test_benchmark_result_with_thermal_summary PASSED")
+
+
+# ============================================================
+# ServerProfilingWorkerLocal Tests
+# ============================================================
+
+def test_server_profiling_worker_local_init():
+    """Test ServerProfilingWorkerLocal initialization."""
+    from server_param_optimizer.server_profiling_worker import ServerProfilingWorkerLocal
+    
+    worker = ServerProfilingWorkerLocal(gpu_id=0, model="test-model")
+    
+    assert worker.gpu_id == 0
+    assert worker.model == "test-model"
+    assert worker.thermal_config is not None
+    assert worker.thermal_monitor is not None
+    
+    print("✅ test_server_profiling_worker_local_init PASSED")
+
+
+def test_server_profiling_worker_local_parse_benchmark_output():
+    """Test ServerProfilingWorkerLocal benchmark output parsing."""
+    from server_param_optimizer.server_profiling_worker import ServerProfilingWorkerLocal
+    
+    worker = ServerProfilingWorkerLocal()
+    
+    # Test pattern 1: "Throughput: X.XX requests/s, Y.YY tokens/s"
+    output1 = "Throughput: 25.50 requests/s, 1850.75 tokens/s"
+    t1, o1, l1 = worker._parse_benchmark_output(output1)
+    assert t1 == 1850.75
+    
+    # Test pattern 2: "X.XX output tokens/s"
+    output2 = "Output: 1500.5 output tokens/s"
+    t2, o2, l2 = worker._parse_benchmark_output(output2)
+    assert o2 == 1500.5
+    
+    # Test empty output
+    t3, o3, l3 = worker._parse_benchmark_output("")
+    assert t3 == 0.0
+    assert o3 == 0.0
+    
+    print("✅ test_server_profiling_worker_local_parse_benchmark_output PASSED")
+
+
+def test_server_profiling_worker_local_build_command():
+    """Test ServerProfilingWorkerLocal command building."""
+    from server_param_optimizer.server_profiling_worker import ServerProfilingWorkerLocal
+    
+    worker = ServerProfilingWorkerLocal(model="test-model")
+    
+    command = worker._build_benchmark_command(
+        max_num_seqs=256,
+        max_num_batched_tokens=8192,
+        num_prompts=100,
+        dataset_path="/nonexistent/path.json"
+    )
+    
+    assert "python" in command
+    assert "--max-num-seqs" in command
+    assert "256" in command
+    assert "--max-num-batched-tokens" in command
+    assert "8192" in command
+    assert "--model" in command
+    assert "test-model" in command
+    
+    print("✅ test_server_profiling_worker_local_build_command PASSED")
+
+
+# ============================================================
+# ServerConfig Tests
+# ============================================================
+
+def test_server_config_creation():
+    """Test ServerConfig dataclass creation."""
+    from server_param_optimizer.server_config_exporter import ServerConfig
+    
+    config = ServerConfig(
+        mode='aggressive',
+        max_num_seqs=256,
+        max_num_batched_tokens=8192,
+        throughput=1500.0,
+        thermal_summary={'temp_max': 75.0},
+        model='test-model',
+        gpu='NVIDIA A100',
+        timestamp='2024-01-01T00:00:00'
+    )
+    
+    assert config.mode == 'aggressive'
+    assert config.max_num_seqs == 256
+    assert config.max_num_batched_tokens == 8192
+    assert config.throughput == 1500.0
+    
+    print("✅ test_server_config_creation PASSED")
+
+
+def test_server_config_to_dict():
+    """Test ServerConfig serialization."""
+    from server_param_optimizer.server_config_exporter import ServerConfig
+    
+    config = ServerConfig(
+        mode='sustained',
+        max_num_seqs=128,
+        max_num_batched_tokens=4096,
+        throughput=1200.0,
+        thermal_summary=None,
+        model='test-model',
+        gpu='NVIDIA A100',
+        timestamp='2024-01-01T00:00:00'
+    )
+    
+    d = config.to_dict()
+    
+    assert isinstance(d, dict)
+    assert d['mode'] == 'sustained'
+    assert d['max_num_seqs'] == 128
+    
+    print("✅ test_server_config_to_dict PASSED")
+
+
+# ============================================================
+# ServerConfigExporter Tests
+# ============================================================
+
+def test_server_config_exporter_init():
+    """Test ServerConfigExporter initialization."""
+    from server_param_optimizer.server_config_exporter import ServerConfigExporter
+    
+    temp_dir = tempfile.mkdtemp()
+    try:
+        exporter = ServerConfigExporter(
+            output_dir=temp_dir,
+            model="test-model",
+            gpu="Test GPU"
+        )
+        
+        assert exporter.output_dir == temp_dir
+        assert exporter.model == "test-model"
+        assert exporter.gpu == "Test GPU"
+        assert exporter.best_aggressive is None
+        assert exporter.best_sustained is None
+        
+        print("✅ test_server_config_exporter_init PASSED")
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_server_config_exporter_update_best_configs():
+    """Test ServerConfigExporter update_best_configs method."""
+    from server_param_optimizer.server_config_exporter import ServerConfigExporter
+    from server_param_optimizer.server_profiling_worker import BenchmarkResult
+    
+    temp_dir = tempfile.mkdtemp()
+    try:
+        exporter = ServerConfigExporter(output_dir=temp_dir)
+        
+        # Create a thermally-safe result
+        result1 = BenchmarkResult(
+            config={'max_num_seqs': 128, 'max_num_batched_tokens': 4096},
+            throughput=1200.0,
+            output_throughput=1000.0,
+            latency=50.0,
+            thermal_summary=None,
+            is_thermally_safe=True,
+            nsys_metrics=None,
+            duration=60.0
+        )
+        
+        updated = exporter.update_best_configs(result1)
+        assert updated == True
+        assert exporter.best_aggressive is not None
+        assert exporter.best_sustained is not None
+        assert exporter.best_aggressive.throughput == 1200.0
+        assert exporter.best_sustained.throughput == 1200.0
+        
+        # Create a higher throughput but not thermally safe result
+        result2 = BenchmarkResult(
+            config={'max_num_seqs': 256, 'max_num_batched_tokens': 8192},
+            throughput=1500.0,
+            output_throughput=1200.0,
+            latency=45.0,
+            thermal_summary=None,
+            is_thermally_safe=False,
+            nsys_metrics=None,
+            duration=60.0
+        )
+        
+        updated = exporter.update_best_configs(result2)
+        assert updated == True
+        assert exporter.best_aggressive.throughput == 1500.0
+        assert exporter.best_sustained.throughput == 1200.0  # Should not change
+        
+        print("✅ test_server_config_exporter_update_best_configs PASSED")
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_server_config_exporter_save_configs():
+    """Test ServerConfigExporter save_configs method."""
+    from server_param_optimizer.server_config_exporter import ServerConfigExporter
+    from server_param_optimizer.server_profiling_worker import BenchmarkResult
+    
+    temp_dir = tempfile.mkdtemp()
+    try:
+        exporter = ServerConfigExporter(output_dir=temp_dir)
+        
+        result = BenchmarkResult(
+            config={'max_num_seqs': 256, 'max_num_batched_tokens': 8192},
+            throughput=1500.0,
+            output_throughput=1200.0,
+            latency=None,
+            thermal_summary=None,
+            is_thermally_safe=True,
+            nsys_metrics=None,
+            duration=120.0
+        )
+        
+        exporter.update_best_configs(result)
+        exporter.save_configs()
+        
+        # Check files were created
+        assert os.path.exists(os.path.join(temp_dir, "config_aggressive.json"))
+        assert os.path.exists(os.path.join(temp_dir, "config_sustained.json"))
+        assert os.path.exists(os.path.join(temp_dir, "optimization_results.json"))
+        
+        # Verify content
+        with open(os.path.join(temp_dir, "config_aggressive.json"), 'r') as f:
+            aggressive_config = json.load(f)
+        assert aggressive_config['config']['max_num_seqs'] == 256
+        
+        print("✅ test_server_config_exporter_save_configs PASSED")
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+def test_server_config_exporter_generate_launch_scripts():
+    """Test ServerConfigExporter launch script generation."""
+    from server_param_optimizer.server_config_exporter import ServerConfigExporter
+    from server_param_optimizer.server_profiling_worker import BenchmarkResult
+    
+    temp_dir = tempfile.mkdtemp()
+    try:
+        exporter = ServerConfigExporter(output_dir=temp_dir)
+        
+        result = BenchmarkResult(
+            config={'max_num_seqs': 256, 'max_num_batched_tokens': 8192},
+            throughput=1500.0,
+            output_throughput=1200.0,
+            latency=None,
+            thermal_summary=None,
+            is_thermally_safe=True,
+            nsys_metrics=None,
+            duration=120.0
+        )
+        
+        exporter.update_best_configs(result)
+        exporter.save_configs()
+        
+        # Check launch scripts were created
+        aggressive_script = os.path.join(temp_dir, "launch_scripts", "launch_aggressive.sh")
+        sustained_script = os.path.join(temp_dir, "launch_scripts", "launch_sustained.sh")
+        
+        assert os.path.exists(aggressive_script)
+        assert os.path.exists(sustained_script)
+        
+        # Check scripts are executable
+        assert os.access(aggressive_script, os.X_OK)
+        assert os.access(sustained_script, os.X_OK)
+        
+        # Check script content
+        with open(aggressive_script, 'r') as f:
+            content = f.read()
+        assert "MAX_NUM_SEQS=256" in content
+        assert "MAX_NUM_BATCHED_TOKENS=8192" in content
+        assert "AGGRESSIVE" in content.upper()
+        
+        print("✅ test_server_config_exporter_generate_launch_scripts PASSED")
+    finally:
+        shutil.rmtree(temp_dir)
+
+
+# ============================================================
+# IterationFeedback Tests
+# ============================================================
+
+def test_iteration_feedback_creation():
+    """Test IterationFeedback dataclass creation."""
+    from server_param_optimizer.server_feedback_collector import IterationFeedback
+    
+    feedback = IterationFeedback(
+        iteration=1,
+        configs_tested=[{'max_num_seqs': 256}],
+        results=[{'throughput': 1500.0}],
+        best_aggressive_throughput=1500.0,
+        best_sustained_throughput=1200.0,
+        timestamp='2024-01-01T00:00:00'
+    )
+    
+    assert feedback.iteration == 1
+    assert len(feedback.configs_tested) == 1
+    assert feedback.best_aggressive_throughput == 1500.0
+    
+    print("✅ test_iteration_feedback_creation PASSED")
+
+
+def test_iteration_feedback_to_dict():
+    """Test IterationFeedback serialization."""
+    from server_param_optimizer.server_feedback_collector import IterationFeedback
+    
+    feedback = IterationFeedback(
+        iteration=2,
+        configs_tested=[],
+        results=[],
+        best_aggressive_throughput=0.0,
+        best_sustained_throughput=0.0,
+        timestamp='2024-01-01T00:00:00'
+    )
+    
+    d = feedback.to_dict()
+    
+    assert isinstance(d, dict)
+    assert d['iteration'] == 2
+    
+    print("✅ test_iteration_feedback_to_dict PASSED")
+
+
+# ============================================================
+# ServerFeedbackCollector Tests
+# ============================================================
+
+def test_server_feedback_collector_init():
+    """Test ServerFeedbackCollector initialization."""
+    from server_param_optimizer.server_feedback_collector import ServerFeedbackCollector
+    
+    temp_file = os.path.join(tempfile.mkdtemp(), "test_state.json")
+    try:
+        collector = ServerFeedbackCollector(state_file=temp_file)
+        
+        assert collector.state_file == temp_file
+        assert collector.iterations == []
+        assert collector.best_aggressive_throughput == 0.0
+        assert collector.best_sustained_throughput == 0.0
+        
+        print("✅ test_server_feedback_collector_init PASSED")
+    finally:
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+        shutil.rmtree(os.path.dirname(temp_file))
+
+
+def test_server_feedback_collector_add_iteration():
+    """Test ServerFeedbackCollector add_iteration method."""
+    from server_param_optimizer.server_feedback_collector import ServerFeedbackCollector
+    from server_param_optimizer.server_profiling_worker import BenchmarkResult
+    
+    temp_file = os.path.join(tempfile.mkdtemp(), "test_state.json")
+    try:
+        collector = ServerFeedbackCollector(state_file=temp_file)
+        
+        configs = [
+            {'max_num_seqs': 128, 'max_num_batched_tokens': 4096},
+            {'max_num_seqs': 256, 'max_num_batched_tokens': 8192}
+        ]
+        
+        results = [
+            BenchmarkResult(
+                config=configs[0],
+                throughput=1200.0,
+                output_throughput=1000.0,
+                latency=50.0,
+                thermal_summary=None,
+                is_thermally_safe=True,
+                nsys_metrics=None,
+                duration=60.0
+            ),
+            BenchmarkResult(
+                config=configs[1],
+                throughput=1500.0,
+                output_throughput=1200.0,
+                latency=45.0,
+                thermal_summary=None,
+                is_thermally_safe=False,
+                nsys_metrics=None,
+                duration=60.0
+            )
+        ]
+        
+        collector.add_iteration(configs, results)
+        
+        assert len(collector.iterations) == 1
+        assert collector.best_aggressive_throughput == 1500.0
+        assert collector.best_sustained_throughput == 1200.0
+        assert len(collector.all_configs_tested) == 2
+        
+        print("✅ test_server_feedback_collector_add_iteration PASSED")
+    finally:
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+        shutil.rmtree(os.path.dirname(temp_file))
+
+
+def test_server_feedback_collector_get_feedback_for_prompt():
+    """Test ServerFeedbackCollector get_feedback_for_prompt method."""
+    from server_param_optimizer.server_feedback_collector import ServerFeedbackCollector
+    
+    temp_file = os.path.join(tempfile.mkdtemp(), "test_state.json")
+    try:
+        collector = ServerFeedbackCollector(state_file=temp_file)
+        
+        # Empty collector should return empty string
+        feedback = collector.get_feedback_for_prompt()
+        assert feedback == ""
+        
+        # Add some data
+        configs = [{'max_num_seqs': 256, 'max_num_batched_tokens': 8192}]
+        results = [{'throughput': 1500.0, 'is_thermally_safe': True}]
+        collector.add_iteration(configs, results)
+        
+        feedback = collector.get_feedback_for_prompt()
+        
+        assert "SERVER PARAMETER OPTIMIZATION FEEDBACK" in feedback
+        assert "Iterations Completed: 1" in feedback
+        assert "BEST CONFIGURATIONS FOUND" in feedback
+        
+        print("✅ test_server_feedback_collector_get_feedback_for_prompt PASSED")
+    finally:
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+        shutil.rmtree(os.path.dirname(temp_file))
+
+
+def test_server_feedback_collector_get_untested_configs():
+    """Test ServerFeedbackCollector get_untested_configs method."""
+    from server_param_optimizer.server_feedback_collector import ServerFeedbackCollector
+    
+    temp_file = os.path.join(tempfile.mkdtemp(), "test_state.json")
+    try:
+        collector = ServerFeedbackCollector(state_file=temp_file)
+        
+        # Add some tested configs
+        configs = [
+            {'max_num_seqs': 128, 'max_num_batched_tokens': 4096},
+            {'max_num_seqs': 256, 'max_num_batched_tokens': 4096}
+        ]
+        results = [{'throughput': 1000.0}, {'throughput': 1200.0}]
+        collector.add_iteration(configs, results)
+        
+        # Define parameter space
+        param_space = {
+            'max_num_seqs': [128, 256, 512],
+            'max_num_batched_tokens': [4096, 8192]
+        }
+        
+        untested = collector.get_untested_configs(param_space)
+        
+        # Should have 4 untested configs (6 total - 2 tested)
+        assert len(untested) == 4
+        
+        # Verify specific untested configs
+        untested_set = {(c['max_num_seqs'], c['max_num_batched_tokens']) for c in untested}
+        assert (128, 8192) in untested_set
+        assert (256, 8192) in untested_set
+        assert (512, 4096) in untested_set
+        assert (512, 8192) in untested_set
+        
+        print("✅ test_server_feedback_collector_get_untested_configs PASSED")
+    finally:
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+        shutil.rmtree(os.path.dirname(temp_file))
+
+
+def test_server_feedback_collector_reset():
+    """Test ServerFeedbackCollector reset method."""
+    from server_param_optimizer.server_feedback_collector import ServerFeedbackCollector
+    
+    temp_file = os.path.join(tempfile.mkdtemp(), "test_state.json")
+    try:
+        collector = ServerFeedbackCollector(state_file=temp_file)
+        
+        # Add some data
+        configs = [{'max_num_seqs': 256}]
+        results = [{'throughput': 1500.0, 'is_thermally_safe': True}]
+        collector.add_iteration(configs, results)
+        
+        assert len(collector.iterations) == 1
+        
+        # Reset
+        collector.reset()
+        
+        assert len(collector.iterations) == 0
+        assert collector.best_aggressive_throughput == 0.0
+        assert collector.best_sustained_throughput == 0.0
+        assert not os.path.exists(temp_file)
+        
+        print("✅ test_server_feedback_collector_reset PASSED")
+    finally:
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+        if os.path.exists(os.path.dirname(temp_file)):
+            shutil.rmtree(os.path.dirname(temp_file))
+
+
+def test_server_feedback_collector_persistence():
+    """Test ServerFeedbackCollector state persistence."""
+    from server_param_optimizer.server_feedback_collector import ServerFeedbackCollector
+    
+    temp_dir = tempfile.mkdtemp()
+    temp_file = os.path.join(temp_dir, "test_state.json")
+    try:
+        # Create collector and add data
+        collector1 = ServerFeedbackCollector(state_file=temp_file)
+        configs = [{'max_num_seqs': 256, 'max_num_batched_tokens': 8192}]
+        results = [{'throughput': 1500.0, 'is_thermally_safe': True}]
+        collector1.add_iteration(configs, results)
+        
+        # Verify state file was created
+        assert os.path.exists(temp_file)
+        
+        # Create new collector that should load the saved state
+        collector2 = ServerFeedbackCollector(state_file=temp_file)
+        
+        assert len(collector2.iterations) == 1
+        assert collector2.best_aggressive_throughput == 1500.0
+        assert len(collector2.all_configs_tested) == 1
+        
+        print("✅ test_server_feedback_collector_persistence PASSED")
+    finally:
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+        shutil.rmtree(temp_dir)
+
+
+# ============================================================
+# New Module Import Tests
+# ============================================================
+
+def test_new_module_imports():
+    """Test that all new classes are exported from the package."""
+    from server_param_optimizer import (
+        ServerProfilingWorker,
+        ServerProfilingWorkerLocal,
+        BenchmarkResult,
+        RAY_AVAILABLE,
+        ServerConfigExporter,
+        ServerConfig,
+        ServerFeedbackCollector,
+        IterationFeedback,
+    )
+    
+    # All imports should work (ServerProfilingWorker may be None if Ray not available)
+    assert ServerProfilingWorkerLocal is not None
+    assert BenchmarkResult is not None
+    assert isinstance(RAY_AVAILABLE, bool)
+    assert ServerConfigExporter is not None
+    assert ServerConfig is not None
+    assert ServerFeedbackCollector is not None
+    assert IterationFeedback is not None
+    
+    print("✅ test_new_module_imports PASSED")
+
+
+# ============================================================
 # Main Test Runner
 # ============================================================
 
@@ -726,6 +1390,41 @@ if __name__ == "__main__":
     
     print("\n=== Module Import Tests ===")
     test_module_imports()
+    
+    print("\n=== BenchmarkResult Tests ===")
+    test_benchmark_result_creation()
+    test_benchmark_result_to_dict()
+    test_benchmark_result_with_thermal_summary()
+    
+    print("\n=== ServerProfilingWorkerLocal Tests ===")
+    test_server_profiling_worker_local_init()
+    test_server_profiling_worker_local_parse_benchmark_output()
+    test_server_profiling_worker_local_build_command()
+    
+    print("\n=== ServerConfig Tests ===")
+    test_server_config_creation()
+    test_server_config_to_dict()
+    
+    print("\n=== ServerConfigExporter Tests ===")
+    test_server_config_exporter_init()
+    test_server_config_exporter_update_best_configs()
+    test_server_config_exporter_save_configs()
+    test_server_config_exporter_generate_launch_scripts()
+    
+    print("\n=== IterationFeedback Tests ===")
+    test_iteration_feedback_creation()
+    test_iteration_feedback_to_dict()
+    
+    print("\n=== ServerFeedbackCollector Tests ===")
+    test_server_feedback_collector_init()
+    test_server_feedback_collector_add_iteration()
+    test_server_feedback_collector_get_feedback_for_prompt()
+    test_server_feedback_collector_get_untested_configs()
+    test_server_feedback_collector_reset()
+    test_server_feedback_collector_persistence()
+    
+    print("\n=== New Module Import Tests ===")
+    test_new_module_imports()
     
     print("\n" + "="*60)
     print("✅ ALL SERVER PARAMETER OPTIMIZER TESTS PASSED")
