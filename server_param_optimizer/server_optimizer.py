@@ -270,11 +270,11 @@ class ServerParameterOptimizer:
             gpu_preset: GPU preset for thermal config and prompts
         """
         self.model_name = model_name
-        self.llm_gpu_id = llm_gpu_id
-        self.benchmark_gpu_id = benchmark_gpu_id
         self.benchmark_duration_minutes = benchmark_duration_minutes
         self.num_iterations = num_iterations
         self.output_dir = output_dir
+        self.llm_gpu_id = llm_gpu_id
+        self.benchmark_gpu_id = benchmark_gpu_id
         self.use_ray = use_ray and RAY_AVAILABLE
         
         # Set GPU preset and derive thermal_config if not explicitly provided
@@ -863,5 +863,4 @@ Examples:
 
 
 if __name__ == "__main__":
-    import sys
     sys.exit(main())

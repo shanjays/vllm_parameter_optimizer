@@ -192,8 +192,7 @@ def get_gpu_preset(gpu_type: str) -> GPUPreset:
     if gpu_type_lower not in GPU_PRESETS:
         available = ', '.join(sorted(set(p.short_name for p in GPU_PRESETS.values())))
         raise ValueError(
-            f"Unknown GPU type: '{gpu_type}'. "
-            f"Available presets: {available}"
+            f"Unknown GPU type: '{gpu_type}'. Available presets: {available}"
         )
     
     return GPU_PRESETS[gpu_type_lower]
