@@ -98,9 +98,33 @@ python server_optimizer.py
 This will:
 1. Run 8 optimization iterations
 2. Test 2-4 configs per iteration (LLM-guided)
-3. Run 20-minute benchmarks with thermal monitoring
+3. Run 10-minute benchmarks with thermal monitoring (default changed from 20 to 10)
 4. Save thermal plots and optimization results
 5. Generate launch scripts for best configs
+
+### Thermal-Boundary Search Mode
+
+Find configurations that reach a target peak GPU temperature:
+
+```bash
+# Example: Find configs that reach 65°C peak, then find reduced variants at 60°C
+CUDA_VISIBLE_DEVICES=5,6 python server_optimizer.py \
+  --llm-gpu 0 \
+  --benchmark-gpu 1 \
+  --target-peak-temp 65 \
+  --peak-tol 1 \
+  --peak-reduction 5 \
+  --repeat-count 1 \
+  --search-candidates 20 \
+  --duration 10
+```
+
+Thermal-boundary mode parameters:
+- `--target-peak-temp`: Target peak GPU temperature (e.g., 65.0)
+- `--peak-tol`: Tolerance in °C (default: 1.0). Accepts configs with peak ≤ target + tol
+- `--peak-reduction`: Temperature reduction for refined variants (default: 5.0)
+- `--repeat-count`: Run each benchmark N times and use max peak across repeats (default: 1)
+- `--search-candidates`: Number of candidate configs to search (default: 20)
 
 ### Quick Test (Shorter Benchmarks)
 
@@ -114,6 +138,30 @@ optimizer = ServerParameterOptimizer(
 optimizer.run_optimization()
 ```
 
+### CLI Arguments
+
+All available arguments:
+
+```bash
+python server_optimizer.py --help
+
+# GPU assignment
+--llm-gpu 0              # GPU for LLM meta-controller (default: 0)
+--benchmark-gpu 1        # GPU for vLLM benchmarks (default: 1)
+
+# Optimization parameters
+--duration 10            # Benchmark duration in minutes (default: 10)
+--iterations 8           # Number of optimization iterations (default: 8)
+--output-dir ./results   # Output directory (default: ./server_optimization_results)
+
+# Thermal-boundary search mode
+--target-peak-temp 65.0  # Enable thermal-boundary mode (default: None)
+--peak-tol 1.0           # Temperature tolerance (default: 1.0)
+--peak-reduction 5.0     # Temp reduction for variants (default: 5.0)
+--repeat-count 1         # Benchmark repeats for conservative peak (default: 1)
+--search-candidates 20   # Number of candidates to search (default: 20)
+```
+
 ### Output Files
 
 After optimization:
@@ -122,6 +170,8 @@ After optimization:
 - `optimization_results.json` - Full results
 - `thermal_plots/*.png` - Thermal visualizations
 - `launch_scripts/*.sh` - Ready-to-run commands
+- `iteration_X/llm_raw.txt` - Full LLM raw output for each iteration
+- `iteration_X/feedback.txt` - Feedback sent to LLM for each iteration
 
 ## Module Structure
 

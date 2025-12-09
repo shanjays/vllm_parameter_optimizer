@@ -215,6 +215,11 @@ class ServerFeedbackCollector:
             lines.append(f"    max_num_seqs: {self.best_aggressive_config.get('max_num_seqs', 'N/A')}")
             lines.append(f"    max_num_batched_tokens: {self.best_aggressive_config.get('max_num_batched_tokens', 'N/A')}")
             lines.append(f"    Throughput: {self.best_aggressive_throughput:.2f} tokens/sec")
+            # Add thermal peak if available
+            agg_result = next((r for r in self.all_results if r.get('config') == self.best_aggressive_config), None)
+            if agg_result and agg_result.get('thermal_summary'):
+                peak_temp = agg_result['thermal_summary'].get('temp_max', 0)
+                lines.append(f"    Peak Temp: {peak_temp:.1f}°C")
             lines.append("")
         
         if self.best_sustained_config:
@@ -222,6 +227,11 @@ class ServerFeedbackCollector:
             lines.append(f"    max_num_seqs: {self.best_sustained_config.get('max_num_seqs', 'N/A')}")
             lines.append(f"    max_num_batched_tokens: {self.best_sustained_config.get('max_num_batched_tokens', 'N/A')}")
             lines.append(f"    Throughput: {self.best_sustained_throughput:.2f} tokens/sec")
+            # Add thermal peak if available
+            sus_result = next((r for r in self.all_results if r.get('config') == self.best_sustained_config), None)
+            if sus_result and sus_result.get('thermal_summary'):
+                peak_temp = sus_result['thermal_summary'].get('temp_max', 0)
+                lines.append(f"    Peak Temp: {peak_temp:.1f}°C")
             lines.append("")
         
         # Recent iteration results
@@ -244,10 +254,17 @@ class ServerFeedbackCollector:
                 is_safe = result.get('is_thermally_safe', False)
                 safe_marker = "✓" if is_safe else "✗"
                 
+                # Get peak temp if available
+                thermal_info = ""
+                if result.get('thermal_summary'):
+                    peak_temp = result['thermal_summary'].get('temp_max', 0)
+                    if peak_temp > 0:
+                        thermal_info = f" peak={peak_temp:.1f}°C"
+                
                 lines.append(
                     f"    seqs={config.get('max_num_seqs', '?'):4d}, "
                     f"tokens={config.get('max_num_batched_tokens', '?'):5d} → "
-                    f"{throughput:8.2f} tok/s [{safe_marker}]"
+                    f"{throughput:8.2f} tok/s [{safe_marker}]{thermal_info}"
                 )
         
         # Patterns observed
@@ -400,6 +417,26 @@ class ServerFeedbackCollector:
             'best_sustained_throughput': self.best_sustained_throughput,
             'best_sustained_config': self.best_sustained_config,
         }
+    
+    def save_feedback_to_disk(self, output_dir: str, iteration: int) -> None:
+        """Save current iteration feedback to disk for auditing.
+        
+        Args:
+            output_dir: Base directory for saving feedback
+            iteration: Current iteration number
+        """
+        iter_dir = os.path.join(output_dir, f"iteration_{iteration}")
+        os.makedirs(iter_dir, exist_ok=True)
+        
+        # Save feedback text
+        feedback_text = self.get_feedback_for_prompt()
+        feedback_path = os.path.join(iter_dir, "feedback.txt")
+        try:
+            with open(feedback_path, 'w') as f:
+                f.write(feedback_text)
+            print(f"[ServerFeedbackCollector] Saved feedback to {feedback_path}")
+        except IOError as e:
+            print(f"[ServerFeedbackCollector] Warning: Could not save feedback: {e}")
     
     def _load_state(self) -> None:
         """Load persisted state from file if it exists."""
