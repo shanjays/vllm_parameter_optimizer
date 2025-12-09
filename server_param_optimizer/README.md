@@ -88,7 +88,7 @@ The optimizer produces two configurations:
 
 ## Usage
 
-### Full Optimization Run
+### Full Optimization Run (Default Mode)
 
 ```bash
 cd server_param_optimizer
@@ -101,6 +101,44 @@ This will:
 3. Run 20-minute benchmarks with thermal monitoring
 4. Save thermal plots and optimization results
 5. Generate launch scripts for best configs
+
+### Thermal-Boundary Search Mode
+
+Find optimal configs based on target peak GPU temperatures:
+
+```bash
+cd server_param_optimizer
+python server_optimizer.py \
+    --search-mode thermal-boundary \
+    --target-peak-temp 80.0 \
+    --peak-tol 1.0 \
+    --peak-reduction 5.0 \
+    --benchmark-duration 10 \
+    --repeat-count 2
+```
+
+**Conservative Defaults:**
+- `--benchmark-duration 10`: 10-minute benchmarks (shorter for faster iteration)
+- `--repeat-count 2`: Run each benchmark twice, use worst-case peak temp
+- `--peak-tol 1.0`: Accept configs within ±1.0°C of target
+- `--peak-reduction 5.0`: Find reduced-temp config 5.0°C below target
+
+**How it works:**
+1. **Phase A (Boundary Search)**: Find largest config that produces peak temp = `target-peak-temp`
+2. **Phase B (Reduced-Temp)**: Find config at `target-peak-temp - peak-reduction` for safety
+3. Saves both as aggressive (Phase A) and sustained (Phase B) configs
+
+**Example:**
+```bash
+# Find configs for 80°C peak temperature
+python server_optimizer.py \
+    --search-mode thermal-boundary \
+    --target-peak-temp 80.0
+```
+
+This finds:
+- **Aggressive config**: Largest footprint producing ~80°C peak
+- **Sustained config**: Safer config producing ~75°C peak
 
 ### Quick Test (Shorter Benchmarks)
 
@@ -122,6 +160,12 @@ After optimization:
 - `optimization_results.json` - Full results
 - `thermal_plots/*.png` - Thermal visualizations
 - `launch_scripts/*.sh` - Ready-to-run commands
+
+**Thermal-boundary mode also saves:**
+- `iteration_thermal_boundary/Phase_A_llm_raw.txt` - LLM output for Phase A
+- `iteration_thermal_boundary/Phase_B_llm_raw.txt` - LLM output for Phase B
+- `iteration_thermal_boundary/Phase_A_thermal_summary.json` - Thermal results
+- `iteration_thermal_boundary/Phase_B_thermal_summary.json` - Thermal results
 
 ## Module Structure
 
