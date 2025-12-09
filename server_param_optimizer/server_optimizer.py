@@ -32,6 +32,21 @@ except ImportError:
     from visualization import ThermalVisualizer
 
 try:
+    from .gpu_presets import (
+        GPUPreset,
+        get_gpu_preset,
+        print_gpu_presets,
+        DEFAULT_GPU_PRESET
+    )
+except ImportError:
+    from gpu_presets import (
+        GPUPreset,
+        get_gpu_preset,
+        print_gpu_presets,
+        DEFAULT_GPU_PRESET
+    )
+
+try:
     from .server_profiling_worker import (
         ServerProfilingWorkerLocal,
         BenchmarkResult,
@@ -237,30 +252,45 @@ class ServerParameterOptimizer:
         llm_gpu_id: int = LLM_GPU_ID,
         benchmark_gpu_id: int = BENCHMARK_GPU_ID,
         use_ray: bool = False,
-        thermal_config: Optional[ThermalConfig] = None
+        thermal_config: Optional[ThermalConfig] = None,
+        gpu_preset: Optional[GPUPreset] = None
     ):
         """Initialize the server parameter optimizer.
         
         Args:
             model_name: Model to benchmark
-            gpu_type: GPU name for metadata
+            gpu_type: GPU name for metadata (used if gpu_preset not provided)
             benchmark_duration_minutes: Duration of each benchmark run
             num_iterations: Number of optimization iterations
             output_dir: Directory to save results
             llm_gpu_id: GPU device index for LLM meta-controller
             benchmark_gpu_id: GPU device index for vLLM benchmarks
             use_ray: Whether to use Ray for distributed profiling
-            thermal_config: Custom thermal configuration
+            thermal_config: Custom thermal configuration (overrides gpu_preset)
+            gpu_preset: GPU preset for thermal config and prompts
         """
         self.model_name = model_name
-        self.gpu_type = gpu_type
         self.benchmark_duration_minutes = benchmark_duration_minutes
         self.num_iterations = num_iterations
         self.output_dir = output_dir
         self.llm_gpu_id = llm_gpu_id
         self.benchmark_gpu_id = benchmark_gpu_id
         self.use_ray = use_ray and RAY_AVAILABLE
-        self.thermal_config = thermal_config or THERMAL_CONFIG
+        
+        # Set GPU preset and derive thermal_config if not explicitly provided
+        self.gpu_preset = gpu_preset
+        if thermal_config is not None:
+            # Explicit thermal_config takes precedence
+            self.thermal_config = thermal_config
+            self.gpu_type = gpu_type
+        elif gpu_preset is not None:
+            # Use GPU preset to derive thermal_config
+            self.thermal_config = gpu_preset.to_thermal_config()
+            self.gpu_type = gpu_preset.name
+        else:
+            # Fall back to legacy defaults
+            self.thermal_config = THERMAL_CONFIG
+            self.gpu_type = gpu_type
         
         # Validate GPU assignment
         validate_gpu_assignment(llm_gpu_id, benchmark_gpu_id)
@@ -285,8 +315,14 @@ class ServerParameterOptimizer:
         print("[ServerOptimizer] Initializing components...")
         print(f"[ServerOptimizer] LLM GPU: {self.llm_gpu_id}, Benchmark GPU: {self.benchmark_gpu_id}")
         
-        # LLM meta-controller (with explicit GPU)
-        self.meta_controller = ServerMetaController(gpu_id=self.llm_gpu_id)
+        # Get GPU config for meta-controller prompt
+        gpu_config = self.gpu_preset.to_gpu_config() if self.gpu_preset else None
+        
+        # LLM meta-controller (with explicit GPU and GPU config)
+        self.meta_controller = ServerMetaController(
+            gpu_id=self.llm_gpu_id,
+            gpu_config=gpu_config
+        )
         
         # Profiling worker (on separate GPU)
         if self.use_ray:
@@ -748,7 +784,34 @@ def main():
     """Main entry point for the server parameter optimizer."""
     import argparse
     
-    parser = argparse.ArgumentParser(description="Server Parameter Optimizer for vLLM")
+    parser = argparse.ArgumentParser(
+        description="Server Parameter Optimizer for vLLM",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Run optimization with H100 SXM preset
+  python server_optimizer.py --gpu-type h100-sxm
+  
+  # Run optimization with A100 40GB preset
+  python server_optimizer.py --gpu-type a100-40gb
+  
+  # List available GPU presets
+  python server_optimizer.py --list-gpus
+  
+  # Use different GPUs for LLM and benchmark
+  python server_optimizer.py --gpu-type h100 --llm-gpu 0 --benchmark-gpu 1
+  
+  # Quick test with shorter duration
+  python server_optimizer.py --duration 5 --iterations 2
+        """
+    )
+    
+    parser.add_argument("--gpu-type", type=str, default=DEFAULT_GPU_PRESET,
+                        help=f"GPU preset type (default: {DEFAULT_GPU_PRESET}). Use --list-gpus to see available presets")
+    parser.add_argument("--list-gpus", action="store_true",
+                        help="List available GPU presets and exit")
+    parser.add_argument("--model", type=str, default=MODEL_NAME,
+                        help=f"Model to benchmark (default: {MODEL_NAME})")
     parser.add_argument("--llm-gpu", type=int, default=LLM_GPU_ID,
                         help=f"GPU ID for LLM meta-controller (default: {LLM_GPU_ID})")
     parser.add_argument("--benchmark-gpu", type=int, default=BENCHMARK_GPU_ID,
@@ -762,22 +825,42 @@ def main():
     
     args = parser.parse_args()
     
+    # Handle --list-gpus
+    if args.list_gpus:
+        print_gpu_presets()
+        return 0
+    
+    # Get GPU preset
+    try:
+        gpu_preset = get_gpu_preset(args.gpu_type)
+    except ValueError as e:
+        print(f"Error: {e}")
+        print("\nRun with --list-gpus to see available GPU presets.")
+        return 1
+    
     print("\n" + "═" * SEPARATOR_WIDTH)
     print("          SERVER PARAMETER OPTIMIZER FOR VLLM")
     print("═" * SEPARATOR_WIDTH)
+    print(f"GPU Preset: {gpu_preset.name}")
+    print(f"  Memory: {gpu_preset.memory_gb} GB {gpu_preset.memory_type}")
+    print(f"  TDP: {gpu_preset.tdp_watts} W")
+    print(f"  Target Temp: {gpu_preset.target_sustained_temp}°C")
+    print("═" * SEPARATOR_WIDTH)
     
     optimizer = ServerParameterOptimizer(
-        model_name=MODEL_NAME,
-        gpu_type=GPU_TYPE,
+        model_name=args.model,
         benchmark_duration_minutes=args.duration,
         num_iterations=args.iterations,
         output_dir=args.output_dir,
         llm_gpu_id=args.llm_gpu,
         benchmark_gpu_id=args.benchmark_gpu,
+        gpu_preset=gpu_preset
     )
     
     optimizer.run_optimization()
+    
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
