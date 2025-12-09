@@ -33,7 +33,7 @@ PARAM_SPACE = {
 # LLM configuration
 META_CONTROLLER_MODEL = "openai/gpt-oss-20b"
 MAX_SEQ_LENGTH = 8192
-MAX_COMPLETION_LENGTH = 4096  # Increased to avoid truncation of LLM output
+MAX_COMPLETION_LENGTH = 4096  # Set to avoid truncation of LLM output
 
 # Logging separator width for consistent terminal output
 SEPARATOR_WIDTH = 70

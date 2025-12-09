@@ -6,11 +6,12 @@ Coordinates all components (LLM, profiling worker, config exporter, feedback col
 to find optimal --max-num-seqs and --max-num-batched-tokens configurations.
 
 Target: NVIDIA H100 80GB with meta-llama/Llama-3.1-8B-Instruct
-Benchmark Duration: 20 minutes per configuration
+Benchmark Duration: 10 minutes per configuration (default)
 """
 
 import json
 import os
+import random
 import sys
 import time
 from datetime import datetime
@@ -395,7 +396,6 @@ class ServerParameterOptimizer:
             untested = [c for c in all_combos if (c['max_num_seqs'], c['max_num_batched_tokens']) not in tested_set]
             
             # Add random untested configs
-            import random
             random.shuffle(untested)
             configs.extend(untested[:num_candidates - len(configs)])
         
