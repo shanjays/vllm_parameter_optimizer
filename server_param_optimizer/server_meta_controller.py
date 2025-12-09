@@ -75,7 +75,8 @@ class ServerMetaController:
         model_name: str = META_CONTROLLER_MODEL,
         gpu_id: int = 0,
         max_seq_length: int = MAX_SEQ_LENGTH,
-        load_in_4bit: bool = True
+        load_in_4bit: bool = True,
+        gpu_config: Optional[Dict[str, Any]] = None
     ):
         """Initialize the meta-controller.
         
@@ -84,11 +85,13 @@ class ServerMetaController:
             gpu_id: GPU device index for LLM
             max_seq_length: Maximum sequence length
             load_in_4bit: Whether to load in 4-bit quantization
+            gpu_config: GPU configuration dict for prompts (optional)
         """
         self.model_name = model_name
         self.gpu_id = gpu_id
         self.max_seq_length = max_seq_length
         self.load_in_4bit = load_in_4bit
+        self.gpu_config = gpu_config or GPU_CONFIG
         
         self.llm = None
         self.tokenizer = None
@@ -102,6 +105,7 @@ class ServerMetaController:
         
         print(f"[ServerMetaController] Configured with model: {model_name}")
         print(f"[ServerMetaController] Device: {self.device}")
+        print(f"[ServerMetaController] Target GPU: {self.gpu_config['name']}")
     
     def _load_model(self) -> None:
         """Load the LLM with LoRA adapters on the specified GPU."""
@@ -229,6 +233,15 @@ class ServerMetaController:
         Returns:
             Complete prompt string for the LLM
         """
+        # Extract GPU config values with defaults
+        gpu_name = self.gpu_config.get('name', 'NVIDIA H100 80GB')
+        gpu_memory = self.gpu_config.get('memory_gb', 80)
+        gpu_tdp = self.gpu_config.get('tdp_watts', 350)
+        gpu_max_temp = self.gpu_config.get('max_safe_temp', 85)
+        gpu_target_temp = self.gpu_config.get('target_sustained_temp', 75)
+        gpu_memory_type = self.gpu_config.get('memory_type', 'HBM3')
+        gpu_recommended_seqs = self.gpu_config.get('recommended_max_seqs', 256)
+        
         prompt = f'''You are an expert in optimizing vLLM server parameters for maximum throughput.
 
 ═══════════════════════════════════════════════════════════════════════════════
@@ -236,11 +249,12 @@ class ServerMetaController:
 ═══════════════════════════════════════════════════════════════════════════════
 
 MODEL: meta-llama/Llama-3.1-8B-Instruct
-GPU: NVIDIA H100 80GB
-  - Memory: 80 GB HBM3
-  - TDP: 350W
-  - Max Safe Temp: 85°C (throttling)
-  - Target Sustained Temp: 75°C
+GPU: {gpu_name}
+  - Memory: {gpu_memory} GB {gpu_memory_type}
+  - TDP: {gpu_tdp}W
+  - Max Safe Temp: {gpu_max_temp}°C (throttling)
+  - Target Sustained Temp: {gpu_target_temp}°C
+  - Recommended Max Seqs: {gpu_recommended_seqs}
 
 ═══════════════════════════════════════════════════════════════════════════════
                            PARAMETERS TO OPTIMIZE
@@ -266,7 +280,7 @@ Constraint: max_num_batched_tokens >= max_num_seqs * 128
 
 Generate 2-4 configurations to test. Consider:
 1. One aggressive config (maximize throughput)
-2. One conservative config (stay below 75°C)
+2. One conservative config (stay below {gpu_target_temp}°C)
 3. Configurations that explore untested regions
 
 Output format:

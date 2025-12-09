@@ -11,6 +11,14 @@ Target: NVIDIA A100 40GB with meta-llama/Llama-3.1-8B-Instruct
 from .thermal_monitor import ThermalMonitor, ThermalSample, ThermalConfig, get_gpu_info
 from .visualization import ThermalVisualizer, PlotConfig
 from .nsys_metrics_extractor import NsysMetricsExtractor, NsysProfile, check_nsys_available
+from .gpu_presets import (
+    GPUPreset,
+    GPU_PRESETS,
+    DEFAULT_GPU_PRESET,
+    get_gpu_preset,
+    list_gpu_presets,
+    print_gpu_presets
+)
 from .server_profiling_worker import (
     ServerProfilingWorker,
     ServerProfilingWorkerLocal,
@@ -47,6 +55,13 @@ __all__ = [
     'NsysMetricsExtractor',
     'NsysProfile',
     'check_nsys_available',
+    # GPU presets (PR 4)
+    'GPUPreset',
+    'GPU_PRESETS',
+    'DEFAULT_GPU_PRESET',
+    'get_gpu_preset',
+    'list_gpu_presets',
+    'print_gpu_presets',
     # Server profiling worker (PR 2)
     'ServerProfilingWorker',
     'ServerProfilingWorkerLocal',
