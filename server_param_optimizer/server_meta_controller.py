@@ -152,12 +152,16 @@ class ServerMetaController:
     
     def generate_configs(
         self,
-        feedback_collector: Optional[Any] = None
+        feedback_collector: Optional[Any] = None,
+        target_peak_temp: Optional[float] = None,
+        peak_tol: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """Generate server configurations using the LLM.
         
         Args:
             feedback_collector: ServerFeedbackCollector with previous results
+            target_peak_temp: Optional target peak temperature for thermal-boundary mode
+            peak_tol: Optional temperature tolerance for thermal-boundary mode
             
         Returns:
             List of configuration dictionaries, each containing:
@@ -184,7 +188,7 @@ class ServerMetaController:
         print("=" * SEPARATOR_WIDTH + "\n")
         
         # Build the prompt
-        prompt = self._build_prompt(feedback_str)
+        prompt = self._build_prompt(feedback_str, target_peak_temp, peak_tol)
         
         # Generate configs using LLM or fallback
         if self.llm is not None and self.tokenizer is not None:
@@ -220,15 +224,51 @@ class ServerMetaController:
         print(f"[ServerMetaController] Generated {len(validated_configs)} valid configurations")
         return validated_configs
     
-    def _build_prompt(self, feedback_str: str) -> str:
+    def _build_prompt(
+        self, 
+        feedback_str: str,
+        target_peak_temp: Optional[float] = None,
+        peak_tol: Optional[float] = None
+    ) -> str:
         """Build the optimization prompt for the LLM.
         
         Args:
             feedback_str: Formatted feedback from previous iterations
+            target_peak_temp: Optional target peak temperature for thermal-boundary mode
+            peak_tol: Optional temperature tolerance
             
         Returns:
             Complete prompt string for the LLM
         """
+        # Build thermal target section if specified
+        thermal_target_section = ""
+        if target_peak_temp is not None:
+            thermal_target_section = f'''
+═══════════════════════════════════════════════════════════════════════════════
+                         THERMAL TARGET (PRIORITY)
+═══════════════════════════════════════════════════════════════════════════════
+
+TARGET PEAK TEMPERATURE: {target_peak_temp}°C (tolerance: ±{peak_tol or 1.0}°C)
+
+IMPORTANT: Your primary goal is to find configurations that produce a peak 
+temperature near but not exceeding {target_peak_temp}°C. Favor configs that:
+- Maximize throughput while staying within {target_peak_temp - (peak_tol or 1.0):.1f}°C to {target_peak_temp + (peak_tol or 1.0):.1f}°C
+- Have large max_num_seqs and max_num_batched_tokens (bigger footprint = higher temp)
+- Also propose 1-2 reduced-temp safer configs below {target_peak_temp - 5:.1f}°C
+
+'''
+        
+        task_section = """Generate 2-4 configurations to test. Consider:
+1. One aggressive config (maximize throughput)
+2. One conservative config (stay below 75°C)
+3. Configurations that explore untested regions"""
+        
+        if target_peak_temp is not None:
+            task_section = f"""Generate 3-5 configurations targeting the specified peak temperature:
+1. Configs with peak temps near {target_peak_temp}°C (within ±{peak_tol or 1.0}°C)
+2. At least one reduced-temp config below {target_peak_temp - 5:.1f}°C for safety
+3. Vary max_num_seqs and max_num_batched_tokens to explore the thermal boundary"""
+        
         prompt = f'''You are an expert in optimizing vLLM server parameters for maximum throughput.
 
 ═══════════════════════════════════════════════════════════════════════════════
@@ -241,7 +281,7 @@ GPU: NVIDIA H100 80GB
   - TDP: 350W
   - Max Safe Temp: 85°C (throttling)
   - Target Sustained Temp: 75°C
-
+{thermal_target_section}
 ═══════════════════════════════════════════════════════════════════════════════
                            PARAMETERS TO OPTIMIZE
 ═══════════════════════════════════════════════════════════════════════════════
@@ -264,10 +304,7 @@ Constraint: max_num_batched_tokens >= max_num_seqs * 128
                            YOUR TASK
 ═══════════════════════════════════════════════════════════════════════════════
 
-Generate 2-4 configurations to test. Consider:
-1. One aggressive config (maximize throughput)
-2. One conservative config (stay below 75°C)
-3. Configurations that explore untested regions
+{task_section}
 
 Output format:
 <param>

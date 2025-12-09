@@ -215,6 +215,11 @@ class ServerFeedbackCollector:
             lines.append(f"    max_num_seqs: {self.best_aggressive_config.get('max_num_seqs', 'N/A')}")
             lines.append(f"    max_num_batched_tokens: {self.best_aggressive_config.get('max_num_batched_tokens', 'N/A')}")
             lines.append(f"    Throughput: {self.best_aggressive_throughput:.2f} tokens/sec")
+            
+            # Add peak temp if available
+            peak_temp = self._get_peak_temp_from_config(self.best_aggressive_config)
+            if peak_temp is not None:
+                lines.append(f"    Peak Temp: {peak_temp:.1f}°C")
             lines.append("")
         
         if self.best_sustained_config:
@@ -222,9 +227,14 @@ class ServerFeedbackCollector:
             lines.append(f"    max_num_seqs: {self.best_sustained_config.get('max_num_seqs', 'N/A')}")
             lines.append(f"    max_num_batched_tokens: {self.best_sustained_config.get('max_num_batched_tokens', 'N/A')}")
             lines.append(f"    Throughput: {self.best_sustained_throughput:.2f} tokens/sec")
+            
+            # Add peak temp if available
+            peak_temp = self._get_peak_temp_from_config(self.best_sustained_config)
+            if peak_temp is not None:
+                lines.append(f"    Peak Temp: {peak_temp:.1f}°C")
             lines.append("")
         
-        # Recent iteration results
+        # Recent iteration results with thermal data
         lines.append("RECENT ITERATION RESULTS:")
         recent_iterations = self.iterations[-3:]  # Last 3 iterations
         
@@ -244,10 +254,14 @@ class ServerFeedbackCollector:
                 is_safe = result.get('is_thermally_safe', False)
                 safe_marker = "✓" if is_safe else "✗"
                 
+                # Get peak temperature from thermal_summary
+                peak_temp = self._get_peak_temp_from_result(result)
+                temp_str = f", peak={peak_temp:.1f}°C" if peak_temp is not None else ""
+                
                 lines.append(
                     f"    seqs={config.get('max_num_seqs', '?'):4d}, "
                     f"tokens={config.get('max_num_batched_tokens', '?'):5d} → "
-                    f"{throughput:8.2f} tok/s [{safe_marker}]"
+                    f"{throughput:8.2f} tok/s [{safe_marker}]{temp_str}"
                 )
         
         # Patterns observed
@@ -258,12 +272,118 @@ class ServerFeedbackCollector:
         # Add failure summary for LLM to learn from
         self._add_failure_summary(lines)
         
+        # Add thermal summary
+        self._add_thermal_summary(lines)
+        
         lines.append("")
         lines.append(f"YOUR GOAL: Find configs that exceed {self.best_aggressive_throughput:.2f} tokens/sec")
         lines.append("           while maintaining thermal safety (<75°C for H100)")
         lines.append("")
         
-        return "\n".join(lines)
+        feedback = "\n".join(lines)
+        
+        # Print full feedback string as requested
+        print("\n" + "=" * 70)
+        print("[ServerFeedbackCollector] FULL FEEDBACK STRING:")
+        print("=" * 70)
+        print(feedback)
+        print("=" * 70 + "\n")
+        
+        return feedback
+    
+    def _get_peak_temp_from_config(self, config: Dict[str, Any]) -> Optional[float]:
+        """Extract peak temperature for a specific config from results.
+        
+        Args:
+            config: Configuration dictionary
+            
+        Returns:
+            Peak temperature in °C or None if not found
+        """
+        for result in self.all_results:
+            result_config = result.get('config', {})
+            if (result_config.get('max_num_seqs') == config.get('max_num_seqs') and
+                result_config.get('max_num_batched_tokens') == config.get('max_num_batched_tokens')):
+                return self._get_peak_temp_from_result(result)
+        return None
+    
+    def _get_peak_temp_from_result(self, result: Dict[str, Any]) -> Optional[float]:
+        """Extract peak temperature from a result dictionary.
+        
+        Args:
+            result: Result dictionary
+            
+        Returns:
+            Peak temperature in °C or None if not available
+        """
+        thermal_summary = result.get('thermal_summary')
+        if thermal_summary is None:
+            return None
+        
+        if isinstance(thermal_summary, dict):
+            return thermal_summary.get('temp_max')
+        elif hasattr(thermal_summary, 'temp_max'):
+            return thermal_summary.temp_max
+        
+        return None
+    
+    def _add_thermal_summary(self, lines: List[str]) -> None:
+        """Add thermal summary showing which configs exceeded/met temperature targets.
+        
+        Args:
+            lines: List of feedback lines to append to
+        """
+        if not self.all_results:
+            return
+        
+        # Find configs that exceeded common thermal targets
+        target_75 = []  # Below 75°C (sustained target)
+        target_80 = []  # Below 80°C (warning)
+        target_85 = []  # Below 85°C (max safe)
+        exceeded = []   # Above 85°C
+        
+        for result in self.all_results:
+            if not result.get('is_successful', True):
+                continue
+            
+            peak_temp = self._get_peak_temp_from_result(result)
+            if peak_temp is None:
+                continue
+            
+            config = result.get('config', {})
+            config_str = f"seqs={config.get('max_num_seqs', '?')}, tokens={config.get('max_num_batched_tokens', '?')}"
+            
+            if peak_temp < 75.0:
+                target_75.append((config_str, peak_temp))
+            elif peak_temp < 80.0:
+                target_80.append((config_str, peak_temp))
+            elif peak_temp < 85.0:
+                target_85.append((config_str, peak_temp))
+            else:
+                exceeded.append((config_str, peak_temp))
+        
+        if not (target_75 or target_80 or target_85 or exceeded):
+            return
+        
+        lines.append("")
+        lines.append("THERMAL ANALYSIS:")
+        
+        if target_75:
+            lines.append(f"  ✓ Below 75°C (Sustained Target): {len(target_75)} configs")
+            for config_str, temp in target_75[:3]:  # Show top 3
+                lines.append(f"    - {config_str}: {temp:.1f}°C")
+        
+        if target_80:
+            lines.append(f"  ⚠️ 75-80°C (Warning Zone): {len(target_80)} configs")
+        
+        if target_85:
+            lines.append(f"  ⚠️ 80-85°C (Near Throttle): {len(target_85)} configs")
+        
+        if exceeded:
+            lines.append(f"  ❌ Above 85°C (Throttling): {len(exceeded)} configs")
+            for config_str, temp in exceeded[:3]:  # Show failures
+                lines.append(f"    - {config_str}: {temp:.1f}°C [AVOID]")
+
     
     def _add_failure_summary(self, lines: List[str]) -> None:
         """Add summary of failed configurations for LLM learning."""

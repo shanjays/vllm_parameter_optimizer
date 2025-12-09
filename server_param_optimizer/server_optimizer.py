@@ -57,9 +57,9 @@ except ImportError:
     from server_feedback_collector import ServerFeedbackCollector
 
 try:
-    from .server_meta_controller import ServerMetaController, PARAM_SPACE
+    from .server_meta_controller import ServerMetaController, PARAM_SPACE, MIN_TOKENS_PER_SEQUENCE
 except ImportError:
-    from server_meta_controller import ServerMetaController, PARAM_SPACE
+    from server_meta_controller import ServerMetaController, PARAM_SPACE, MIN_TOKENS_PER_SEQUENCE
 
 # Try to import Ray
 if RAY_AVAILABLE:
@@ -331,6 +331,315 @@ class ServerParameterOptimizer:
         print(f"LLM GPU: {self.llm_gpu_id} | Benchmark GPU: {self.benchmark_gpu_id}")
         print(f"Benchmark Duration: {self.benchmark_duration_minutes} minutes per config")
         print("═" * SEPARATOR_WIDTH + "\n")
+    
+    def run_thermal_boundary_search(
+        self,
+        target_peak_temp: float,
+        peak_tol: float = 1.0,
+        peak_reduction: float = 5.0,
+        duration_minutes: int = 10,
+        repeat_count: int = 2
+    ) -> None:
+        """Run thermal-boundary search to find configs at target temperatures.
+        
+        This search mode finds the largest parameter configurations that produce
+        a target peak GPU temperature, then finds reduced-temperature alternatives.
+        
+        Args:
+            target_peak_temp: Target peak GPU temperature in °C
+            peak_tol: Temperature tolerance in °C (configs within target ± tol are acceptable)
+            peak_reduction: Temperature reduction for safer config (°C below target)
+            duration_minutes: Benchmark duration in minutes
+            repeat_count: Number of times to repeat each benchmark (uses worst-case peak)
+        """
+        self.start_time = time.time()
+        
+        print("\n" + "═" * SEPARATOR_WIDTH)
+        print(f"[ServerOptimizer] THERMAL-BOUNDARY SEARCH MODE")
+        print("═" * SEPARATOR_WIDTH)
+        print(f"Target peak temp: {target_peak_temp}°C (tolerance: ±{peak_tol}°C)")
+        print(f"Reduced-temp target: {target_peak_temp - peak_reduction}°C")
+        print(f"Benchmark: {duration_minutes} minutes × {repeat_count} repeats")
+        print(f"Absolute max safe temp: {self.thermal_config.max_safe_temp}°C")
+        print("═" * SEPARATOR_WIDTH + "\n")
+        
+        # Create iteration output directory
+        iteration_dir = os.path.join(self.output_dir, "iteration_thermal_boundary")
+        os.makedirs(iteration_dir, exist_ok=True)
+        
+        # Phase A: Find boundary config at target temperature
+        print("\n" + "=" * SEPARATOR_WIDTH)
+        print("[ServerOptimizer] PHASE A: Finding boundary config at target temperature")
+        print("=" * SEPARATOR_WIDTH + "\n")
+        
+        boundary_config, boundary_result = self.find_boundary_config_for_target_temp(
+            target_temp=target_peak_temp,
+            tol=peak_tol,
+            duration_minutes=duration_minutes,
+            repeat_count=repeat_count,
+            iteration_dir=iteration_dir
+        )
+        
+        if boundary_config is None:
+            print("\n[ServerOptimizer] ❌ Failed to find boundary config at target temperature")
+            print("[ServerOptimizer] Try adjusting --target-peak-temp or --peak-tol")
+            return
+        
+        # Update best configs with boundary result
+        self.config_exporter.update_best_configs(boundary_result)
+        
+        print(f"\n[ServerOptimizer] ✓ Boundary config found:")
+        print(f"  max_num_seqs: {boundary_config.get('max_num_seqs')}")
+        print(f"  max_num_batched_tokens: {boundary_config.get('max_num_batched_tokens')}")
+        peak_temp = _get_thermal_value(boundary_result.thermal_summary, 'temp_max')
+        print(f"  Peak temp: {peak_temp:.1f}°C")
+        print(f"  Throughput: {boundary_result.throughput:.1f} tokens/sec")
+        
+        # Phase B: Find reduced-temperature config
+        print("\n" + "=" * SEPARATOR_WIDTH)
+        print(f"[ServerOptimizer] PHASE B: Finding reduced-temp config (target: {target_peak_temp - peak_reduction}°C)")
+        print("=" * SEPARATOR_WIDTH + "\n")
+        
+        reduced_config, reduced_result = self.find_boundary_config_for_target_temp(
+            target_temp=target_peak_temp - peak_reduction,
+            tol=peak_tol,
+            duration_minutes=duration_minutes,
+            repeat_count=repeat_count,
+            iteration_dir=iteration_dir,
+            phase_name="Phase_B"
+        )
+        
+        if reduced_config is None:
+            print(f"\n[ServerOptimizer] ⚠️ Could not find reduced-temp config at {target_peak_temp - peak_reduction}°C")
+            print("[ServerOptimizer] Using boundary config as both aggressive and sustained")
+        else:
+            # Update best configs with reduced-temp result
+            self.config_exporter.update_best_configs(reduced_result)
+            
+            print(f"\n[ServerOptimizer] ✓ Reduced-temp config found:")
+            print(f"  max_num_seqs: {reduced_config.get('max_num_seqs')}")
+            print(f"  max_num_batched_tokens: {reduced_config.get('max_num_batched_tokens')}")
+            peak_temp = _get_thermal_value(reduced_result.thermal_summary, 'temp_max')
+            print(f"  Peak temp: {peak_temp:.1f}°C")
+            print(f"  Throughput: {reduced_result.throughput:.1f} tokens/sec")
+        
+        # Save final results
+        self._save_final_results()
+        
+        # Print summary
+        self.print_final_summary()
+    
+    def find_boundary_config_for_target_temp(
+        self,
+        target_temp: float,
+        tol: float,
+        duration_minutes: int,
+        repeat_count: int,
+        iteration_dir: str,
+        phase_name: str = "Phase_A"
+    ) -> tuple:
+        """Find the largest config that produces target peak temperature.
+        
+        Searches through LLM-generated configs and parameter space to find
+        the config with the largest footprint (max_num_seqs * max_num_batched_tokens)
+        that produces a peak temperature within target ± tol.
+        
+        Args:
+            target_temp: Target peak temperature in °C
+            tol: Temperature tolerance in °C
+            duration_minutes: Benchmark duration in minutes
+            repeat_count: Number of benchmark repeats
+            iteration_dir: Directory to save iteration results
+            phase_name: Phase identifier for logging
+            
+        Returns:
+            Tuple of (config_dict, BenchmarkResult) or (None, None) if not found
+        """
+        print(f"\n[{phase_name}] Generating candidate configs from LLM...")
+        
+        # Get LLM-generated configs with thermal target
+        llm_configs = self.meta_controller.generate_configs(
+            feedback_collector=self.feedback_collector,
+            target_peak_temp=target_temp,
+            peak_tol=tol
+        )
+        
+        # Save LLM raw output
+        llm_output_path = os.path.join(iteration_dir, f"{phase_name}_llm_raw.txt")
+        with open(llm_output_path, 'w') as f:
+            f.write(f"Target peak temp: {target_temp}°C ± {tol}°C\n")
+            f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+            f.write("=" * 60 + "\n\n")
+            f.write("LLM Generated Configs:\n")
+            for i, cfg in enumerate(llm_configs, 1):
+                f.write(f"\nConfig {i}:\n")
+                f.write(json.dumps(cfg, indent=2))
+                f.write("\n")
+        print(f"[{phase_name}] Saved LLM output to {llm_output_path}")
+        
+        # Build candidate list: LLM configs + fallback enumeration
+        candidates = []
+        
+        # Add LLM configs
+        for cfg in llm_configs:
+            footprint = cfg.get('max_num_seqs', 0) * cfg.get('max_num_batched_tokens', 0)
+            candidates.append((footprint, cfg))
+        
+        # Add fallback candidates from parameter space (top 20 by footprint)
+        print(f"[{phase_name}] Adding fallback candidates from parameter space...")
+        param_space = self.meta_controller.get_param_space()
+        fallback_candidates = []
+        
+        for seqs in param_space['max_num_seqs']:
+            for tokens in param_space['max_num_batched_tokens']:
+                # Check constraint
+                if tokens >= seqs * MIN_TOKENS_PER_SEQUENCE:
+                    footprint = seqs * tokens
+                    fallback_candidates.append((footprint, {
+                        'max_num_seqs': seqs,
+                        'max_num_batched_tokens': tokens,
+                        'name': f'fallback_seqs{seqs}_tokens{tokens}'
+                    }))
+        
+        # Sort fallback by footprint (largest first) and take top 20
+        fallback_candidates.sort(reverse=True, key=lambda x: x[0])
+        candidates.extend(fallback_candidates[:20])
+        
+        # Remove duplicates and sort by footprint (largest first)
+        seen = set()
+        unique_candidates = []
+        for footprint, cfg in candidates:
+            key = (cfg.get('max_num_seqs'), cfg.get('max_num_batched_tokens'))
+            if key not in seen:
+                seen.add(key)
+                unique_candidates.append((footprint, cfg))
+        
+        unique_candidates.sort(reverse=True, key=lambda x: x[0])
+        
+        print(f"[{phase_name}] Testing {len(unique_candidates)} candidate configs (largest-first)...")
+        
+        # Search largest-first for acceptable config
+        best_config = None
+        best_result = None
+        
+        for idx, (footprint, cfg) in enumerate(unique_candidates, 1):
+            print(f"\n[{phase_name}] Candidate {idx}/{len(unique_candidates)}: "
+                  f"seqs={cfg.get('max_num_seqs')}, tokens={cfg.get('max_num_batched_tokens')} "
+                  f"(footprint={footprint})")
+            
+            # Run benchmark with repeats
+            peak_temps = []
+            results = []
+            
+            for repeat_num in range(1, repeat_count + 1):
+                print(f"[{phase_name}] Repeat {repeat_num}/{repeat_count}...")
+                
+                result = self._benchmark_config_for_thermal_search(
+                    config=cfg,
+                    duration_minutes=duration_minutes,
+                    phase_name=phase_name,
+                    repeat_num=repeat_num
+                )
+                
+                results.append(result)
+                
+                # Check for abort conditions
+                if result.error:
+                    print(f"[{phase_name}] ❌ Benchmark failed: {result.error}")
+                    break
+                
+                # Get peak temp
+                peak_temp = _get_thermal_value(result.thermal_summary, 'temp_max')
+                peak_temps.append(peak_temp)
+                print(f"[{phase_name}] Peak temp: {peak_temp:.1f}°C")
+                
+                # Check absolute max safe temp
+                if peak_temp >= self.thermal_config.max_safe_temp:
+                    print(f"[{phase_name}] ⚠️ ABORT: Peak temp {peak_temp:.1f}°C >= max safe {self.thermal_config.max_safe_temp}°C")
+                    break
+            
+            # Skip failed benchmarks
+            if results and results[0].error:
+                continue
+            
+            # Use worst-case (highest) peak temp
+            if peak_temps:
+                worst_peak = max(peak_temps)
+                print(f"[{phase_name}] Worst-case peak temp across {len(peak_temps)} repeats: {worst_peak:.1f}°C")
+                
+                # Check if within target ± tol
+                if abs(worst_peak - target_temp) <= tol:
+                    print(f"[{phase_name}] ✓ ACCEPTABLE: {worst_peak:.1f}°C within {target_temp}°C ± {tol}°C")
+                    best_config = cfg
+                    best_result = results[0]  # Use first result for throughput
+                    
+                    # Save thermal summary with worst-case peak
+                    thermal_summary_path = os.path.join(iteration_dir, f"{phase_name}_thermal_summary.json")
+                    with open(thermal_summary_path, 'w') as f:
+                        json.dump({
+                            'config': cfg,
+                            'target_temp': target_temp,
+                            'tolerance': tol,
+                            'worst_peak_temp': worst_peak,
+                            'all_peak_temps': peak_temps,
+                            'throughput': best_result.throughput,
+                            'timestamp': datetime.now().isoformat()
+                        }, f, indent=2)
+                    
+                    break  # Stop at first acceptable config (largest footprint)
+                else:
+                    print(f"[{phase_name}] ✗ Outside tolerance: {worst_peak:.1f}°C not in [{target_temp - tol:.1f}, {target_temp + tol:.1f}]°C")
+        
+        return best_config, best_result
+    
+    def _benchmark_config_for_thermal_search(
+        self,
+        config: Dict[str, Any],
+        duration_minutes: int,
+        phase_name: str,
+        repeat_num: int
+    ) -> BenchmarkResult:
+        """Run a single benchmark for thermal search.
+        
+        Args:
+            config: Config dict with max_num_seqs and max_num_batched_tokens
+            duration_minutes: Benchmark duration
+            phase_name: Phase identifier
+            repeat_num: Repeat number
+            
+        Returns:
+            BenchmarkResult
+        """
+        max_num_seqs = config.get('max_num_seqs', 64)
+        max_num_batched_tokens = config.get('max_num_batched_tokens', 8192)
+        
+        print(f"\n[{phase_name}] Benchmarking: seqs={max_num_seqs}, tokens={max_num_batched_tokens} (repeat {repeat_num})")
+        
+        if self.use_ray:
+            result = ray.get(self.worker.run_benchmark.remote(
+                max_num_seqs=max_num_seqs,
+                max_num_batched_tokens=max_num_batched_tokens,
+                duration_minutes=duration_minutes
+            ))
+        else:
+            result = self.worker.run_benchmark(
+                max_num_seqs=max_num_seqs,
+                max_num_batched_tokens=max_num_batched_tokens,
+                duration_minutes=duration_minutes
+            )
+        
+        # Print result
+        if result.error:
+            print(f"[{phase_name}] ❌ Failed: {result.error}")
+        else:
+            print(f"[{phase_name}] Throughput: {result.throughput:.1f} tokens/sec")
+            if result.thermal_summary:
+                temp_max = _get_thermal_value(result.thermal_summary, 'temp_max')
+                temp_avg = _get_thermal_value(result.thermal_summary, 'temp_avg')
+                print(f"[{phase_name}] Thermal: max={temp_max:.1f}°C, avg={temp_avg:.1f}°C")
+        
+        self.total_benchmarks += 1
+        return result
     
     def run_optimization(self, num_iterations: Optional[int] = None) -> None:
         """Run the full optimization loop.
@@ -760,11 +1069,41 @@ def main():
     parser.add_argument("--output-dir", type=str, default=OUTPUT_DIR,
                         help=f"Output directory (default: {OUTPUT_DIR})")
     
+    # Thermal-boundary search mode arguments
+    parser.add_argument("--search-mode", type=str, default="default",
+                        choices=["default", "thermal-boundary"],
+                        help="Search mode: 'default' (standard iterative) or 'thermal-boundary' (target temperature-based)")
+    parser.add_argument("--target-peak-temp", type=float, default=None,
+                        help="Target peak GPU temperature in °C for thermal-boundary mode")
+    parser.add_argument("--peak-tol", type=float, default=1.0,
+                        help="Temperature tolerance in °C for thermal-boundary mode (default: 1.0)")
+    parser.add_argument("--peak-reduction", type=float, default=5.0,
+                        help="Temperature reduction in °C for reduced-temp config (default: 5.0)")
+    parser.add_argument("--benchmark-duration", type=int, default=10,
+                        help="Benchmark duration in minutes for thermal-boundary mode (default: 10)")
+    parser.add_argument("--repeat-count", type=int, default=2,
+                        help="Number of times to repeat each benchmark for thermal-boundary mode (default: 2)")
+    parser.add_argument("--absolute-max-temp", type=float, default=None,
+                        help="Absolute maximum temperature override (default: uses THERMAL_CONFIG.max_safe_temp)")
+    
     args = parser.parse_args()
     
     print("\n" + "═" * SEPARATOR_WIDTH)
     print("          SERVER PARAMETER OPTIMIZER FOR VLLM")
     print("═" * SEPARATOR_WIDTH)
+    
+    # Override thermal config if absolute-max-temp provided
+    thermal_config = THERMAL_CONFIG
+    if args.absolute_max_temp:
+        thermal_config = ThermalConfig(
+            max_safe_temp=args.absolute_max_temp,
+            target_sustained_temp=THERMAL_CONFIG.target_sustained_temp,
+            warning_temp=THERMAL_CONFIG.warning_temp,
+            max_power=THERMAL_CONFIG.max_power,
+            total_memory_gb=THERMAL_CONFIG.total_memory_gb,
+            gpu_name=THERMAL_CONFIG.gpu_name
+        )
+        print(f"[ServerOptimizer] Using custom absolute max temp: {args.absolute_max_temp}°C")
     
     optimizer = ServerParameterOptimizer(
         model_name=MODEL_NAME,
@@ -774,9 +1113,30 @@ def main():
         output_dir=args.output_dir,
         llm_gpu_id=args.llm_gpu,
         benchmark_gpu_id=args.benchmark_gpu,
+        thermal_config=thermal_config
     )
     
-    optimizer.run_optimization()
+    if args.search_mode == "thermal-boundary":
+        if args.target_peak_temp is None:
+            print("[ERROR] --target-peak-temp is required for thermal-boundary mode")
+            sys.exit(1)
+        
+        print(f"\n[ServerOptimizer] Running thermal-boundary search mode")
+        print(f"  Target peak temp: {args.target_peak_temp}°C")
+        print(f"  Peak tolerance: ±{args.peak_tol}°C")
+        print(f"  Peak reduction: {args.peak_reduction}°C")
+        print(f"  Benchmark duration: {args.benchmark_duration} minutes")
+        print(f"  Repeat count: {args.repeat_count}\n")
+        
+        optimizer.run_thermal_boundary_search(
+            target_peak_temp=args.target_peak_temp,
+            peak_tol=args.peak_tol,
+            peak_reduction=args.peak_reduction,
+            duration_minutes=args.benchmark_duration,
+            repeat_count=args.repeat_count
+        )
+    else:
+        optimizer.run_optimization()
 
 
 if __name__ == "__main__":
