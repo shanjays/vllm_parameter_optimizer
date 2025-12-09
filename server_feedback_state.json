@@ -1,0 +1,95 @@
+{
+  "iterations": [
+    {
+      "iteration": 1,
+      "configs_tested": [
+        {
+          "max_num_seqs": 64,
+          "max_num_batched_tokens": 8192
+        }
+      ],
+      "results": [
+        {
+          "throughput": 1500.0,
+          "is_thermally_safe": true,
+          "config": {
+            "max_num_seqs": 64,
+            "max_num_batched_tokens": 8192
+          },
+          "is_successful": true,
+          "effective_throughput": 1500.0
+        }
+      ],
+      "best_aggressive_throughput": 1500.0,
+      "best_sustained_throughput": 1500.0,
+      "timestamp": "2025-12-09T01:29:36.477545"
+    },
+    {
+      "iteration": 2,
+      "configs_tested": [
+        {
+          "max_num_seqs": 64,
+          "max_num_batched_tokens": 8192
+        }
+      ],
+      "results": [
+        {
+          "throughput": 1500.0,
+          "is_thermally_safe": true,
+          "config": {
+            "max_num_seqs": 64,
+            "max_num_batched_tokens": 8192
+          },
+          "is_successful": true,
+          "effective_throughput": 1500.0
+        }
+      ],
+      "best_aggressive_throughput": 1500.0,
+      "best_sustained_throughput": 1500.0,
+      "timestamp": "2025-12-09T01:31:51.671565"
+    }
+  ],
+  "all_configs_tested": [
+    {
+      "max_num_seqs": 64,
+      "max_num_batched_tokens": 8192
+    },
+    {
+      "max_num_seqs": 64,
+      "max_num_batched_tokens": 8192
+    }
+  ],
+  "all_results": [
+    {
+      "throughput": 1500.0,
+      "is_thermally_safe": true,
+      "config": {
+        "max_num_seqs": 64,
+        "max_num_batched_tokens": 8192
+      },
+      "is_successful": true,
+      "effective_throughput": 1500.0
+    },
+    {
+      "throughput": 1500.0,
+      "is_thermally_safe": true,
+      "config": {
+        "max_num_seqs": 64,
+        "max_num_batched_tokens": 8192
+      },
+      "is_successful": true,
+      "effective_throughput": 1500.0
+    }
+  ],
+  "best_aggressive_throughput": 1500.0,
+  "best_aggressive_config": {
+    "max_num_seqs": 64,
+    "max_num_batched_tokens": 8192
+  },
+  "best_sustained_throughput": 1500.0,
+  "best_sustained_config": {
+    "max_num_seqs": 64,
+    "max_num_batched_tokens": 8192
+  },
+  "last_updated": "2025-12-09T01:31:51.671621"
+}

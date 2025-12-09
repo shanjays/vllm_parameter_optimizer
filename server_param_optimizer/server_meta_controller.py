@@ -33,7 +33,7 @@ PARAM_SPACE = {
 # LLM configuration
 META_CONTROLLER_MODEL = "openai/gpt-oss-20b"
 MAX_SEQ_LENGTH = 8192
-MAX_COMPLETION_LENGTH = 4096
+MAX_COMPLETION_LENGTH = 4096  # Set to avoid truncation of LLM output
 
 # Logging separator width for consistent terminal output
 SEPARATOR_WIDTH = 70
@@ -75,7 +75,9 @@ class ServerMetaController:
         model_name: str = META_CONTROLLER_MODEL,
         gpu_id: int = 0,
         max_seq_length: int = MAX_SEQ_LENGTH,
-        load_in_4bit: bool = True
+        load_in_4bit: bool = True,
+        target_peak_temp: Optional[float] = None,
+        peak_tol: float = 1.0
     ):
         """Initialize the meta-controller.
         
@@ -84,11 +86,15 @@ class ServerMetaController:
             gpu_id: GPU device index for LLM
             max_seq_length: Maximum sequence length
             load_in_4bit: Whether to load in 4-bit quantization
+            target_peak_temp: Target peak GPU temperature for thermal-boundary mode
+            peak_tol: Tolerance for target peak temperature
         """
         self.model_name = model_name
         self.gpu_id = gpu_id
         self.max_seq_length = max_seq_length
         self.load_in_4bit = load_in_4bit
+        self.target_peak_temp = target_peak_temp
+        self.peak_tol = peak_tol
         
         self.llm = None
         self.tokenizer = None
@@ -102,6 +108,8 @@ class ServerMetaController:
         
         print(f"[ServerMetaController] Configured with model: {model_name}")
         print(f"[ServerMetaController] Device: {self.device}")
+        if target_peak_temp is not None:
+            print(f"[ServerMetaController] Thermal-boundary mode: target={target_peak_temp}°C ± {peak_tol}°C")
     
     def _load_model(self) -> None:
         """Load the LLM with LoRA adapters on the specified GPU."""
@@ -153,18 +161,20 @@ class ServerMetaController:
     def generate_configs(
         self,
         feedback_collector: Optional[Any] = None
-    ) -> List[Dict[str, Any]]:
+    ) -> tuple:
         """Generate server configurations using the LLM.
         
         Args:
             feedback_collector: ServerFeedbackCollector with previous results
             
         Returns:
-            List of configuration dictionaries, each containing:
+            Tuple of (configs, raw_llm_output) where configs is a list of configuration 
+            dictionaries, each containing:
             - name: descriptive name
             - max_num_seqs: maximum concurrent sequences
             - max_num_batched_tokens: maximum tokens per batch
             - rationale: explanation for the configuration
+            And raw_llm_output is the full LLM response string (or empty if LLM not used)
         """
         self._load_model()
         
@@ -187,8 +197,9 @@ class ServerMetaController:
         prompt = self._build_prompt(feedback_str)
         
         # Generate configs using LLM or fallback
+        raw_llm_output = ""
         if self.llm is not None and self.tokenizer is not None:
-            configs = self._generate_with_llm(prompt)
+            configs, raw_llm_output = self._generate_with_llm(prompt)
         else:
             print("[ServerMetaController] LLM not available, using default configurations")
             configs = self._generate_default_configs()
@@ -218,7 +229,7 @@ class ServerMetaController:
         print("=" * SEPARATOR_WIDTH + "\n")
         
         print(f"[ServerMetaController] Generated {len(validated_configs)} valid configurations")
-        return validated_configs
+        return validated_configs, raw_llm_output
     
     def _build_prompt(self, feedback_str: str) -> str:
         """Build the optimization prompt for the LLM.
@@ -229,6 +240,24 @@ class ServerMetaController:
         Returns:
             Complete prompt string for the LLM
         """
+        # Build thermal instructions if target_peak_temp is set
+        thermal_instructions = ""
+        if self.target_peak_temp is not None:
+            thermal_instructions = f'''
+═══════════════════════════════════════════════════════════════════════════════
+                         THERMAL-BOUNDARY OPTIMIZATION MODE
+═══════════════════════════════════════════════════════════════════════════════
+
+TARGET PEAK TEMPERATURE: {self.target_peak_temp}°C (± {self.peak_tol}°C tolerance)
+
+Your task is to propose configurations that:
+1. REACH THE TARGET: Find configs with peak GPU temp ≈ {self.target_peak_temp}°C
+2. PROVIDE REDUCED-TEMP VARIANTS: Also return 1-2 configs with peak ≈ {self.target_peak_temp - 5.0}°C
+
+Prioritize configurations that maximize throughput while staying within thermal limits.
+
+'''
+        
         prompt = f'''You are an expert in optimizing vLLM server parameters for maximum throughput.
 
 ═══════════════════════════════════════════════════════════════════════════════
@@ -242,7 +271,7 @@ GPU: NVIDIA H100 80GB
   - Max Safe Temp: 85°C (throttling)
   - Target Sustained Temp: 75°C
 
-═══════════════════════════════════════════════════════════════════════════════
+{thermal_instructions}═══════════════════════════════════════════════════════════════════════════════
                            PARAMETERS TO OPTIMIZE
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -294,14 +323,14 @@ NOW GENERATE YOUR CONFIGURATIONS:
 '''
         return prompt
     
-    def _generate_with_llm(self, prompt: str) -> List[Dict[str, Any]]:
+    def _generate_with_llm(self, prompt: str) -> tuple:
         """Generate configs using the LLM.
         
         Args:
             prompt: The optimization prompt
             
         Returns:
-            List of generated configurations
+            Tuple of (configs_list, raw_llm_output_string)
         """
         try:
             # Tokenize the prompt
@@ -354,11 +383,11 @@ NOW GENERATE YOUR CONFIGURATIONS:
                 print(f"  Parsed config {i}: {cfg}")
             print()
             
-            return configs
+            return configs, llm_output
             
         except Exception as e:
             print(f"[ServerMetaController] Error generating with LLM: {e}")
-            return self._generate_default_configs()
+            return self._generate_default_configs(), ""
     
     def _parse_configs(self, llm_output: str) -> List[Dict[str, Any]]:
         """Parse configuration JSON from LLM output.
